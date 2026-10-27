@@ -34,10 +34,105 @@ class MemoryOdoo:
                 "write_date": "2026-10-27 01:00:00",
             }
         }
+        self.categories = {
+            10: {
+                "id": 10,
+                "name": "General",
+                "complete_name": "General",
+                "sequence": 10,
+                "active": True,
+                "parent_id": False,
+                "show_in_portal": True,
+            },
+            11: {
+                "id": 11,
+                "name": "기타(ETC)",
+                "complete_name": "기타(ETC)",
+                "sequence": 1,
+                "active": True,
+                "parent_id": False,
+                "show_in_portal": True,
+            },
+        }
+        self.parameters = {}
+        self.users = {
+            7: {
+                "id": 7,
+                "name": "Agent Kim",
+                "active": True,
+                "share": False,
+                "group_ids": [31],
+            },
+            8: {
+                "id": 8,
+                "name": "No Helpdesk Access",
+                "active": True,
+                "share": False,
+                "group_ids": [1],
+            },
+            9: {
+                "id": 9,
+                "name": "Inactive Agent",
+                "active": False,
+                "share": False,
+                "group_ids": [31],
+            },
+        }
+        self.created_ticket_values = None
+
+    @staticmethod
+    def _matches(record, domain):
+        for field, operator, value in domain or []:
+            current = record.get(field)
+            if operator == "=" and current != value:
+                return False
+            if operator == "!=" and current == value:
+                return False
+            if operator == "in":
+                if isinstance(current, list):
+                    if not any(item in value for item in current):
+                        return False
+                elif current not in value:
+                    return False
+            if operator == "=like":
+                prefix = value[:-1] if value.endswith("%") else value
+                if not str(current or "").startswith(prefix):
+                    return False
+        return True
+
+    @staticmethod
+    def _select_fields(records, fields, limit):
+        return [
+            {field: copy.deepcopy(record.get(field)) for field in fields}
+            for record in records[:limit]
+        ]
 
     def search_read(self, model, fields, domain=None, limit=50, context=None):
         if model == "res.users":
-            return [{"id": 7, "name": "Agent Kim"}]
+            records = list(self.users.values())
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "ir.model.data":
+            records = [
+                {
+                    "module": "helpdesk_mgmt",
+                    "name": "group_helpdesk_user",
+                    "model": "res.groups",
+                    "res_id": 31,
+                }
+            ]
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "ir.config_parameter":
+            records = list(self.parameters.values())
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "helpdesk.ticket.category":
+            records = list(self.categories.values())
+            if not (context or {}).get("active_test") is False:
+                records = [record for record in records if record["active"]]
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
         if model == "project.task":
             return []
         if model != "helpdesk.ticket":
@@ -47,21 +142,80 @@ class MemoryOdoo:
         if not (context or {}).get("active_test") is False:
             records = [record for record in records if record["active"]]
 
-        for field, operator, value in domain or []:
-            if operator != "=":
-                raise AssertionError(f"Unsupported test operator: {operator}")
-            records = [record for record in records if record.get(field) == value]
+        records = [record for record in records if self._matches(record, domain)]
+        return self._select_fields(records, fields, limit)
 
-        return [
-            {field: copy.deepcopy(record.get(field)) for field in fields}
-            for record in records[:limit]
-        ]
+    def create(self, model, values):
+        if model == "helpdesk.ticket.category":
+            record_id = max(self.categories) + 1
+            parent_id = values.get("parent_id") or False
+            parent_name = self.categories[parent_id]["complete_name"] if parent_id else ""
+            name = values["name"]
+            self.categories[record_id] = {
+                "id": record_id,
+                "name": name,
+                "complete_name": f"{parent_name} / {name}" if parent_name else name,
+                "sequence": 10,
+                "active": True,
+                "parent_id": (
+                    [parent_id, self.categories[parent_id]["complete_name"]]
+                    if parent_id
+                    else False
+                ),
+                "show_in_portal": values.get("show_in_portal", True),
+            }
+            return [record_id]
+        if model == "ir.config_parameter":
+            record_id = 100 + len(self.parameters)
+            self.parameters[record_id] = {"id": record_id, **copy.deepcopy(values)}
+            return [record_id]
+        if model == "helpdesk.ticket":
+            self.created_ticket_values = copy.deepcopy(values)
+            record_id = max(self.tickets) + 1
+            category_id = values.get("category_id")
+            user_id = values.get("user_id")
+            self.tickets[record_id] = {
+                "id": record_id,
+                "number": f"T-{record_id:03d}",
+                "name": values["name"],
+                "description": values["description"],
+                "stage_id": False,
+                "priority": values["priority"],
+                "user_id": [user_id, self.users[user_id]["name"]] if user_id else False,
+                "category_id": (
+                    [category_id, self.categories[category_id]["complete_name"]]
+                    if category_id
+                    else False
+                ),
+                "partner_id": False,
+                "team_id": False,
+                "closed": False,
+                "active": True,
+                "create_date": "2026-10-27 02:00:00",
+                "write_date": "2026-10-27 02:00:00",
+            }
+            return [record_id]
+        raise AssertionError(f"Unexpected create model: {model}")
 
     def write(self, model, record_id, values):
-        if model != "helpdesk.ticket" or record_id not in self.tickets:
-            raise AssertionError("Unexpected write")
-        self.tickets[record_id].update(copy.deepcopy(values))
-        return True
+        if model == "helpdesk.ticket" and record_id in self.tickets:
+            updated_values = copy.deepcopy(values)
+            if "user_id" in updated_values:
+                user_id = updated_values["user_id"]
+                updated_values["user_id"] = (
+                    [user_id, self.users[user_id]["name"]] if user_id else False
+                )
+            self.tickets[record_id].update(updated_values)
+            return True
+        if model == "helpdesk.ticket.category" and record_id in self.categories:
+            self.categories[record_id].update(copy.deepcopy(values))
+            if "name" in values:
+                self.categories[record_id]["complete_name"] = values["name"]
+            return True
+        if model == "ir.config_parameter" and record_id in self.parameters:
+            self.parameters[record_id].update(copy.deepcopy(values))
+            return True
+        raise AssertionError("Unexpected write")
 
 
 class OcaTicketApiTests(unittest.TestCase):
@@ -237,6 +391,124 @@ class OcaTicketApiTests(unittest.TestCase):
             paths.index("/api/oca/tickets/archived"),
             paths.index("/api/oca/tickets/{ticket_id}"),
         )
+
+
+class CategoryApiTests(unittest.TestCase):
+    def setUp(self):
+        self.odoo = MemoryOdoo()
+        patch.object(
+            main, "odoo_search_read", side_effect=self.odoo.search_read
+        ).start()
+        patch.object(main, "odoo_write", side_effect=self.odoo.write).start()
+        patch.object(main, "odoo_create", side_effect=self.odoo.create).start()
+
+    def tearDown(self):
+        patch.stopall()
+
+    def test_category_create_update_and_list(self):
+        created = main.create_oca_category(main.OcaCategoryCreate(name="Network"))
+        category_id = created["category"]["id"]
+
+        updated = main.update_oca_category(
+            category_id,
+            main.OcaCategoryUpdate(name="Network Support", show_in_portal=False),
+        )
+        listed = main.get_oca_categories()["categories"]
+        detail = main.get_oca_category_detail(category_id)["category"]
+
+        self.assertEqual(updated["category"]["name"], "Network Support")
+        self.assertFalse(updated["category"]["show_in_portal"])
+        self.assertIn(category_id, [category["id"] for category in listed])
+        self.assertEqual(detail["name"], "Network Support")
+
+    def test_inactive_category_cannot_be_selected_for_new_ticket(self):
+        main.archive_oca_category(10)
+
+        with self.assertRaises(HTTPException) as caught:
+            main.create_oca_ticket(
+                main.OcaTicketCreate(
+                    title="New", description="Description", category_id=10
+                )
+            )
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertNotIn(10, [item["id"] for item in main.get_oca_categories()["categories"]])
+        self.assertIn(10, [item["id"] for item in main.get_all_oca_categories()["categories"]])
+
+    def test_unknown_category_is_rejected_for_new_ticket(self):
+        with self.assertRaises(HTTPException) as caught:
+            main.create_oca_ticket(
+                main.OcaTicketCreate(
+                    title="New", description="Description", category_id=999
+                )
+            )
+
+        self.assertEqual(caught.exception.status_code, 404)
+
+    def test_category_default_assignee_can_be_set_and_read(self):
+        result = main.update_oca_category(
+            10, main.OcaCategoryUpdate(default_assignee_id=7)
+        )
+
+        self.assertEqual(result["category"]["default_assignee"]["id"], 7)
+        self.assertEqual(len(self.odoo.parameters), 1)
+
+    def test_ticket_creation_with_category_auto_assigns_default_user(self):
+        main.update_oca_category(10, main.OcaCategoryUpdate(default_assignee_id=7))
+
+        created = main.create_oca_ticket(
+            main.OcaTicketCreate(
+                title="New", description="Description", category_id=10
+            )
+        )
+        detail = main.get_oca_ticket_detail(created["ticket_id"])["ticket"]
+
+        self.assertTrue(created["auto_assigned"])
+        self.assertEqual(self.odoo.created_ticket_values["category_id"], 10)
+        self.assertEqual(self.odoo.created_ticket_values["user_id"], 7)
+        self.assertEqual(detail["category"]["id"], 10)
+        self.assertEqual(detail["assignee"]["id"], 7)
+        self.assertTrue(detail["auto_assigned"])
+
+    def test_category_without_default_user_leaves_ticket_unassigned(self):
+        created = main.create_oca_ticket(
+            main.OcaTicketCreate(
+                title="New", description="Description", category_id=11
+            )
+        )
+
+        self.assertFalse(created["auto_assigned"])
+        self.assertFalse(self.odoo.created_ticket_values["user_id"])
+
+    def test_invalid_default_assignee_is_rejected(self):
+        for user_id in (8, 9, 999):
+            with self.subTest(user_id=user_id):
+                with self.assertRaises(HTTPException) as caught:
+                    main.update_oca_category(
+                        10, main.OcaCategoryUpdate(default_assignee_id=user_id)
+                    )
+                self.assertEqual(caught.exception.status_code, 422)
+
+    def test_etc_category_is_always_sorted_last(self):
+        categories = main.get_oca_categories()["categories"]
+
+        self.assertEqual(categories[-1]["name"], "기타(ETC)")
+
+    def test_manual_assignment_still_works(self):
+        result = main.update_oca_ticket(
+            1, main.OcaTicketUpdate(assignee_id=7)
+        )
+
+        self.assertEqual(result["ticket"]["assignee"]["id"], 7)
+
+    def test_clearing_default_assignee_keeps_single_parameter_record(self):
+        main.update_oca_category(10, main.OcaCategoryUpdate(default_assignee_id=7))
+        result = main.update_oca_category(
+            10, main.OcaCategoryUpdate(default_assignee_id=None)
+        )
+
+        self.assertIsNone(result["category"]["default_assignee"])
+        self.assertEqual(len(self.odoo.parameters), 1)
 
 
 class OdooJson2Tests(unittest.TestCase):
