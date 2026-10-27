@@ -12,6 +12,15 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 import main  # noqa: E402
+from app import config  # noqa: E402
+from app.routers import archive, categories, legacy, tickets  # noqa: E402
+from app.schemas import (  # noqa: E402
+    OcaCategoryCreate,
+    OcaCategoryUpdate,
+    OcaTicketCreate,
+    OcaTicketUpdate,
+)
+from app.services import odoo  # noqa: E402
 
 
 class MemoryOdoo:
@@ -222,9 +231,9 @@ class OcaTicketApiTests(unittest.TestCase):
     def setUp(self):
         self.odoo = MemoryOdoo()
         self.search_patch = patch.object(
-            main, "odoo_search_read", side_effect=self.odoo.search_read
+            odoo, "search_read", side_effect=self.odoo.search_read
         )
-        self.write_patch = patch.object(main, "odoo_write", side_effect=self.odoo.write)
+        self.write_patch = patch.object(odoo, "write", side_effect=self.odoo.write)
         self.search_patch.start()
         self.write_patch.start()
 
@@ -232,68 +241,68 @@ class OcaTicketApiTests(unittest.TestCase):
         patch.stopall()
 
     def test_archive_active_ticket(self):
-        result = main.archive_oca_ticket(1)
+        result = archive.archive_oca_ticket(1)
 
         self.assertTrue(result["success"])
         self.assertFalse(result["ticket"]["active"])
         self.assertFalse(self.odoo.tickets[1]["active"])
 
     def test_archived_ticket_is_excluded_from_active_list(self):
-        main.archive_oca_ticket(1)
+        archive.archive_oca_ticket(1)
 
-        result = main.get_oca_tickets()
+        result = tickets.get_oca_tickets()
 
         self.assertEqual(result, {"success": True, "count": 0, "tickets": []})
 
     def test_archived_ticket_appears_in_archived_list(self):
-        main.archive_oca_ticket(1)
+        archive.archive_oca_ticket(1)
 
-        result = main.get_archived_oca_tickets()
+        result = archive.get_archived_oca_tickets()
 
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["tickets"][0]["id"], 1)
         self.assertFalse(result["tickets"][0]["active"])
 
     def test_archiving_an_archived_ticket_returns_409(self):
-        main.archive_oca_ticket(1)
+        archive.archive_oca_ticket(1)
 
         with self.assertRaises(HTTPException) as caught:
-            main.archive_oca_ticket(1)
+            archive.archive_oca_ticket(1)
 
         self.assertEqual(caught.exception.status_code, 409)
 
     def test_restore_archived_ticket(self):
-        main.archive_oca_ticket(1)
+        archive.archive_oca_ticket(1)
 
-        result = main.restore_oca_ticket(1)
+        result = archive.restore_oca_ticket(1)
 
         self.assertTrue(result["success"])
         self.assertTrue(result["ticket"]["active"])
 
     def test_restored_ticket_reappears_in_active_list(self):
-        main.archive_oca_ticket(1)
-        main.restore_oca_ticket(1)
+        archive.archive_oca_ticket(1)
+        archive.restore_oca_ticket(1)
 
-        result = main.get_oca_tickets()
+        result = tickets.get_oca_tickets()
 
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["tickets"][0]["id"], 1)
 
     def test_restoring_an_active_ticket_returns_409(self):
         with self.assertRaises(HTTPException) as caught:
-            main.restore_oca_ticket(1)
+            archive.restore_oca_ticket(1)
 
         self.assertEqual(caught.exception.status_code, 409)
 
     def test_non_positive_id_returns_400(self):
-        for operation in (main.archive_oca_ticket, main.restore_oca_ticket):
+        for operation in (archive.archive_oca_ticket, archive.restore_oca_ticket):
             with self.subTest(operation=operation.__name__):
                 with self.assertRaises(HTTPException) as caught:
                     operation(0)
                 self.assertEqual(caught.exception.status_code, 400)
 
     def test_unknown_id_returns_404(self):
-        for operation in (main.archive_oca_ticket, main.restore_oca_ticket):
+        for operation in (archive.archive_oca_ticket, archive.restore_oca_ticket):
             with self.subTest(operation=operation.__name__):
                 with self.assertRaises(HTTPException) as caught:
                     operation(999)
@@ -302,8 +311,8 @@ class OcaTicketApiTests(unittest.TestCase):
     def test_archive_restore_preserves_ticket_data(self):
         before = copy.deepcopy(self.odoo.tickets[1])
 
-        main.archive_oca_ticket(1)
-        main.restore_oca_ticket(1)
+        archive.archive_oca_ticket(1)
+        archive.restore_oca_ticket(1)
 
         after = self.odoo.tickets[1]
         for field in (
@@ -319,30 +328,30 @@ class OcaTicketApiTests(unittest.TestCase):
             self.assertEqual(after[field], before[field])
 
     def test_archived_ticket_cannot_be_read_or_updated_until_restored(self):
-        main.archive_oca_ticket(1)
+        archive.archive_oca_ticket(1)
 
         with self.assertRaises(HTTPException) as read_error:
-            main.get_oca_ticket_detail(1)
+            tickets.get_oca_ticket_detail(1)
         self.assertEqual(read_error.exception.status_code, 404)
 
         with self.assertRaises(HTTPException) as update_error:
-            main.update_oca_ticket(1, main.OcaTicketUpdate(title="Changed"))
+            tickets.update_oca_ticket(1, OcaTicketUpdate(title="Changed"))
         self.assertEqual(update_error.exception.status_code, 404)
 
-        main.restore_oca_ticket(1)
-        result = main.update_oca_ticket(1, main.OcaTicketUpdate(title="Changed"))
+        archive.restore_oca_ticket(1)
+        result = tickets.update_oca_ticket(1, OcaTicketUpdate(title="Changed"))
         self.assertEqual(result["ticket"]["title"], "Changed")
 
     def test_existing_create_read_update_and_project_routes_still_work(self):
-        with patch.object(main, "odoo_create_ticket", return_value=[22]):
-            created = main.create_oca_ticket(
-                main.OcaTicketCreate(title="New", description="Description")
+        with patch.object(tickets, "odoo_create_ticket", return_value=[22]):
+            created = tickets.create_oca_ticket(
+                OcaTicketCreate(title="New", description="Description")
             )
-        detail = main.get_oca_ticket_detail(1)
-        updated = main.update_oca_ticket(
-            1, main.OcaTicketUpdate(priority="2", assignee_id=7)
+        detail = tickets.get_oca_ticket_detail(1)
+        updated = tickets.update_oca_ticket(
+            1, OcaTicketUpdate(priority="2", assignee_id=7)
         )
-        project_list = main.get_tickets()
+        project_list = legacy.get_tickets()
 
         self.assertEqual(created["ticket_id"], 22)
         self.assertEqual(detail["ticket"]["id"], 1)
@@ -350,9 +359,9 @@ class OcaTicketApiTests(unittest.TestCase):
         self.assertEqual(project_list["count"], 0)
 
     def test_create_leaves_ticket_number_generation_to_odoo(self):
-        with patch.object(main, "odoo_create_ticket", return_value=[22]) as create:
-            main.create_oca_ticket(
-                main.OcaTicketCreate(title="New", description="Description")
+        with patch.object(tickets, "odoo_create_ticket", return_value=[22]) as create:
+            tickets.create_oca_ticket(
+                OcaTicketCreate(title="New", description="Description")
             )
 
         values = create.call_args.args[0]
@@ -364,10 +373,10 @@ class OcaTicketApiTests(unittest.TestCase):
         for code, label in expected.items():
             with self.subTest(code=code):
                 self.odoo.tickets[1]["priority"] = code
-                detail = main.get_oca_ticket_detail(1)["ticket"]
-                listing = main.get_oca_tickets()["tickets"][0]
-                updated = main.update_oca_ticket(
-                    1, main.OcaTicketUpdate(priority=code)
+                detail = tickets.get_oca_ticket_detail(1)["ticket"]
+                listing = tickets.get_oca_tickets()["tickets"][0]
+                updated = tickets.update_oca_ticket(
+                    1, OcaTicketUpdate(priority=code)
                 )["ticket"]
 
                 for ticket in (detail, listing, updated):
@@ -378,14 +387,14 @@ class OcaTicketApiTests(unittest.TestCase):
         for value in ("-1", "4", "urgent", ""):
             with self.subTest(value=value):
                 with self.assertRaises(ValidationError):
-                    main.OcaTicketCreate(
+                    OcaTicketCreate(
                         title="New", description="Description", priority=value
                     )
                 with self.assertRaises(ValidationError):
-                    main.OcaTicketUpdate(priority=value)
+                    OcaTicketUpdate(priority=value)
 
     def test_archived_static_route_is_registered_before_dynamic_detail(self):
-        paths = [route.path for route in main.app.routes]
+        paths = list(main.app.openapi()["paths"])
 
         self.assertLess(
             paths.index("/api/oca/tickets/archived"),
@@ -397,24 +406,24 @@ class CategoryApiTests(unittest.TestCase):
     def setUp(self):
         self.odoo = MemoryOdoo()
         patch.object(
-            main, "odoo_search_read", side_effect=self.odoo.search_read
+            odoo, "search_read", side_effect=self.odoo.search_read
         ).start()
-        patch.object(main, "odoo_write", side_effect=self.odoo.write).start()
-        patch.object(main, "odoo_create", side_effect=self.odoo.create).start()
+        patch.object(odoo, "write", side_effect=self.odoo.write).start()
+        patch.object(odoo, "create", side_effect=self.odoo.create).start()
 
     def tearDown(self):
         patch.stopall()
 
     def test_category_create_update_and_list(self):
-        created = main.create_oca_category(main.OcaCategoryCreate(name="Network"))
+        created = categories.create_oca_category(OcaCategoryCreate(name="Network"))
         category_id = created["category"]["id"]
 
-        updated = main.update_oca_category(
+        updated = categories.update_oca_category(
             category_id,
-            main.OcaCategoryUpdate(name="Network Support", show_in_portal=False),
+            OcaCategoryUpdate(name="Network Support", show_in_portal=False),
         )
-        listed = main.get_oca_categories()["categories"]
-        detail = main.get_oca_category_detail(category_id)["category"]
+        listed = categories.get_oca_categories()["categories"]
+        detail = categories.get_oca_category_detail(category_id)["category"]
 
         self.assertEqual(updated["category"]["name"], "Network Support")
         self.assertFalse(updated["category"]["show_in_portal"])
@@ -422,23 +431,23 @@ class CategoryApiTests(unittest.TestCase):
         self.assertEqual(detail["name"], "Network Support")
 
     def test_inactive_category_cannot_be_selected_for_new_ticket(self):
-        main.archive_oca_category(10)
+        categories.archive_oca_category(10)
 
         with self.assertRaises(HTTPException) as caught:
-            main.create_oca_ticket(
-                main.OcaTicketCreate(
+            tickets.create_oca_ticket(
+                OcaTicketCreate(
                     title="New", description="Description", category_id=10
                 )
             )
 
         self.assertEqual(caught.exception.status_code, 422)
-        self.assertNotIn(10, [item["id"] for item in main.get_oca_categories()["categories"]])
-        self.assertIn(10, [item["id"] for item in main.get_all_oca_categories()["categories"]])
+        self.assertNotIn(10, [item["id"] for item in categories.get_oca_categories()["categories"]])
+        self.assertIn(10, [item["id"] for item in categories.get_all_oca_categories()["categories"]])
 
     def test_unknown_category_is_rejected_for_new_ticket(self):
         with self.assertRaises(HTTPException) as caught:
-            main.create_oca_ticket(
-                main.OcaTicketCreate(
+            tickets.create_oca_ticket(
+                OcaTicketCreate(
                     title="New", description="Description", category_id=999
                 )
             )
@@ -446,22 +455,22 @@ class CategoryApiTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 404)
 
     def test_category_default_assignee_can_be_set_and_read(self):
-        result = main.update_oca_category(
-            10, main.OcaCategoryUpdate(default_assignee_id=7)
+        result = categories.update_oca_category(
+            10, OcaCategoryUpdate(default_assignee_id=7)
         )
 
         self.assertEqual(result["category"]["default_assignee"]["id"], 7)
         self.assertEqual(len(self.odoo.parameters), 1)
 
     def test_ticket_creation_with_category_auto_assigns_default_user(self):
-        main.update_oca_category(10, main.OcaCategoryUpdate(default_assignee_id=7))
+        categories.update_oca_category(10, OcaCategoryUpdate(default_assignee_id=7))
 
-        created = main.create_oca_ticket(
-            main.OcaTicketCreate(
+        created = tickets.create_oca_ticket(
+            OcaTicketCreate(
                 title="New", description="Description", category_id=10
             )
         )
-        detail = main.get_oca_ticket_detail(created["ticket_id"])["ticket"]
+        detail = tickets.get_oca_ticket_detail(created["ticket_id"])["ticket"]
 
         self.assertTrue(created["auto_assigned"])
         self.assertEqual(self.odoo.created_ticket_values["category_id"], 10)
@@ -471,8 +480,8 @@ class CategoryApiTests(unittest.TestCase):
         self.assertTrue(detail["auto_assigned"])
 
     def test_category_without_default_user_leaves_ticket_unassigned(self):
-        created = main.create_oca_ticket(
-            main.OcaTicketCreate(
+        created = tickets.create_oca_ticket(
+            OcaTicketCreate(
                 title="New", description="Description", category_id=11
             )
         )
@@ -484,27 +493,27 @@ class CategoryApiTests(unittest.TestCase):
         for user_id in (8, 9, 999):
             with self.subTest(user_id=user_id):
                 with self.assertRaises(HTTPException) as caught:
-                    main.update_oca_category(
-                        10, main.OcaCategoryUpdate(default_assignee_id=user_id)
+                    categories.update_oca_category(
+                        10, OcaCategoryUpdate(default_assignee_id=user_id)
                     )
                 self.assertEqual(caught.exception.status_code, 422)
 
     def test_etc_category_is_always_sorted_last(self):
-        categories = main.get_oca_categories()["categories"]
+        listed_categories = categories.get_oca_categories()["categories"]
 
-        self.assertEqual(categories[-1]["name"], "기타(ETC)")
+        self.assertEqual(listed_categories[-1]["name"], "기타(ETC)")
 
     def test_manual_assignment_still_works(self):
-        result = main.update_oca_ticket(
-            1, main.OcaTicketUpdate(assignee_id=7)
+        result = tickets.update_oca_ticket(
+            1, OcaTicketUpdate(assignee_id=7)
         )
 
         self.assertEqual(result["ticket"]["assignee"]["id"], 7)
 
     def test_clearing_default_assignee_keeps_single_parameter_record(self):
-        main.update_oca_category(10, main.OcaCategoryUpdate(default_assignee_id=7))
-        result = main.update_oca_category(
-            10, main.OcaCategoryUpdate(default_assignee_id=None)
+        categories.update_oca_category(10, OcaCategoryUpdate(default_assignee_id=7))
+        result = categories.update_oca_category(
+            10, OcaCategoryUpdate(default_assignee_id=None)
         )
 
         self.assertIsNone(result["category"]["default_assignee"])
@@ -518,10 +527,10 @@ class OdooJson2Tests(unittest.TestCase):
         response.json.return_value = []
 
         with (
-            patch.object(main, "ODOO_API_KEY", "test-key"),
-            patch.object(main.requests, "post", return_value=response) as post,
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response) as post,
         ):
-            main.odoo_search_read(
+            odoo.search_read(
                 "helpdesk.ticket",
                 ["id"],
                 domain=[["active", "=", False]],
