@@ -477,7 +477,7 @@ class CategoryApiTests(unittest.TestCase):
         self.assertEqual(self.odoo.created_ticket_values["user_id"], 7)
         self.assertEqual(detail["category"]["id"], 10)
         self.assertEqual(detail["assignee"]["id"], 7)
-        self.assertTrue(detail["auto_assigned"])
+        self.assertIsNone(detail["auto_assigned"])
 
     def test_category_without_default_user_leaves_ticket_unassigned(self):
         created = tickets.create_oca_ticket(
@@ -488,6 +488,8 @@ class CategoryApiTests(unittest.TestCase):
 
         self.assertFalse(created["auto_assigned"])
         self.assertFalse(self.odoo.created_ticket_values["user_id"])
+        detail = tickets.get_oca_ticket_detail(created["ticket_id"])["ticket"]
+        self.assertIsNone(detail["auto_assigned"])
 
     def test_invalid_default_assignee_is_rejected(self):
         for user_id in (8, 9, 999):
@@ -504,11 +506,17 @@ class CategoryApiTests(unittest.TestCase):
         self.assertEqual(listed_categories[-1]["name"], "기타(ETC)")
 
     def test_manual_assignment_still_works(self):
+        categories.update_oca_category(
+            10, OcaCategoryUpdate(default_assignee_id=7)
+        )
+        self.odoo.tickets[1]["category_id"] = [10, "General"]
+
         result = tickets.update_oca_ticket(
             1, OcaTicketUpdate(assignee_id=7)
         )
 
         self.assertEqual(result["ticket"]["assignee"]["id"], 7)
+        self.assertIsNone(result["ticket"]["auto_assigned"])
 
     def test_clearing_default_assignee_keeps_single_parameter_record(self):
         categories.update_oca_category(10, OcaCategoryUpdate(default_assignee_id=7))

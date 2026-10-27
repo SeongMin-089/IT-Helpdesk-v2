@@ -73,14 +73,10 @@ def transform_project_ticket(task):
     }
 
 
-def transform_oca_ticket(ticket, category_default_assignees=None):
+def transform_oca_ticket(ticket):
     priority_code = str(ticket.get("priority") or "1")
     category = oca_relation(ticket.get("category_id"))
     assignee = oca_relation(ticket.get("user_id"))
-    category_default_assignees = category_default_assignees or {}
-    default_assignee = (
-        category_default_assignees.get(category["id"]) if category else None
-    )
     return {
         "id": ticket["id"],
         "reference": ticket.get("number") or "",
@@ -91,9 +87,9 @@ def transform_oca_ticket(ticket, category_default_assignees=None):
         "priority_code": priority_code,
         "assignee": assignee,
         "category": category,
-        "auto_assigned": bool(
-            default_assignee and assignee and default_assignee["id"] == assignee["id"]
-        ),
+        # Odoo does not preserve enough provenance to distinguish an automatic
+        # assignment from a manual assignment after the ticket is created.
+        "auto_assigned": None,
         "requester": oca_relation(ticket.get("partner_id")),
         "team": oca_relation(ticket.get("team_id")),
         "closed": bool(ticket.get("closed")),
@@ -104,14 +100,7 @@ def transform_oca_ticket(ticket, category_default_assignees=None):
 
 
 def transform_oca_tickets(records):
-    category_ids = {
-        record["category_id"][0]
-        for record in records
-        if isinstance(record.get("category_id"), (list, tuple))
-        and record["category_id"]
-    }
-    default_assignees = get_category_default_assignees(category_ids)
-    return [transform_oca_ticket(record, default_assignees) for record in records]
+    return [transform_oca_ticket(record) for record in records]
 
 
 def is_etc_category(category):

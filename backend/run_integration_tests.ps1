@@ -21,7 +21,8 @@ if ($config["ODOO_URL"] -notmatch '^http://(localhost|127\.0\.0\.1):8070/?$') {
     throw "안전 차단: 테스트 Odoo 서버(8070)가 아닙니다."
 }
 
-Write-Host "테스트 DB 확인: It_Helpdesk_v2_test"
+Write-Host "테스트 환경 확인: It_Helpdesk_v2_test / Odoo 8070"
+Write-Host "주의: 아래 실행은 Mock 기반 unittest이며 실제 Odoo DB 연동 테스트가 아닙니다."
 
 # 테스트에 사용하는 설정을 명시적으로 고정
 $env:ODOO_URL = $config["ODOO_URL"]
