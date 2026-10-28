@@ -104,3 +104,42 @@ def write(model, record_id, values):
         )
     except requests.exceptions.RequestException:
         raise HTTPException(status_code=502, detail="Cannot connect to Odoo")
+
+
+def message_post(model, record_id, body):
+    _ensure_api_key()
+    try:
+        response = requests.post(
+            f"{config.ODOO_URL}/json/2/{model}/message_post",
+            headers=_headers(),
+            json={
+                "ids": [record_id],
+                "body": body,
+                "body_is_html": True,
+                "message_type": "comment",
+                "subtype_xmlid": "mail.mt_note",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if (
+            not isinstance(result, list)
+            or len(result) != 1
+            or not isinstance(result[0], int)
+            or result[0] <= 0
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail="Odoo message post returned an unexpected result",
+            )
+        return result[0]
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Odoo request timed out")
+    except requests.exceptions.HTTPError:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Odoo message post failed: HTTP {response.status_code}",
+        )
+    except requests.exceptions.RequestException:
+        raise HTTPException(status_code=502, detail="Cannot connect to Odoo")

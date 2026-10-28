@@ -19,3 +19,6 @@ dist/
 
 # Logs
 *.log
+
+# Agent
+AGENTS.md

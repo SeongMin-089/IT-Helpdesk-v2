@@ -4,12 +4,25 @@ from fastapi import APIRouter, HTTPException
 
 from app.constants import OCA_TICKET_FIELDS
 from app.routers.categories import get_category_record
-from app.schemas import OcaTicketCreate, OcaTicketStageUpdate, OcaTicketUpdate
+from app.schemas import (
+    OcaTicketCreate,
+    OcaTicketReprocess,
+    OcaTicketResolve,
+    OcaTicketStageUpdate,
+    OcaTicketUpdate,
+)
 from app.services import assignments, odoo
 from app.transformers import transform_oca_tickets
 
 
 router = APIRouter(prefix="/api/oca/tickets")
+
+WORKFLOW_STAGE_COUNT = 5
+NEW_STAGE = 0
+ASSIGNED_STAGE = 1
+IN_PROGRESS_STAGE = 2
+RESOLVED_STAGE = 3
+DONE_STAGE = 4
 
 
 def odoo_create_ticket(values):
@@ -51,6 +64,113 @@ def get_active_compatible_stage(stage_id, ticket):
             detail="문의 회사에서 사용할 수 없는 단계입니다.",
         )
     return stage
+
+
+def get_ticket_for_stage_change(ticket_id):
+    if ticket_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="올바르지 않은 문의 번호입니다.",
+        )
+
+    records = odoo.search_read(
+        model="helpdesk.ticket",
+        fields=OCA_TICKET_FIELDS,
+        domain=[["id", "=", ticket_id]],
+        limit=1,
+        context={"active_test": False},
+    )
+    if not records:
+        raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+    if not records[0].get("active"):
+        raise HTTPException(
+            status_code=409,
+            detail="보관된 문의의 단계는 변경할 수 없습니다.",
+        )
+    return records[0]
+
+
+def get_ticket_workflow(ticket):
+    stages = odoo.search_read(
+        model="helpdesk.ticket.stage",
+        fields=[
+            "id",
+            "name",
+            "sequence",
+            "active",
+            "team_ids",
+            "company_id",
+            "closed",
+        ],
+        domain=[["active", "=", True]],
+        limit=100,
+    )
+    ticket_team_id = relation_id(ticket.get("team_id"))
+    ticket_company_id = relation_id(ticket.get("company_id"))
+    applicable = [
+        stage
+        for stage in stages
+        if (
+            not stage.get("team_ids")
+            or ticket_team_id in stage.get("team_ids", [])
+        )
+        and (
+            not relation_id(stage.get("company_id"))
+            or relation_id(stage.get("company_id")) == ticket_company_id
+        )
+    ]
+    applicable.sort(key=lambda stage: (stage.get("sequence") or 0, stage["id"]))
+
+    if (
+        len(applicable) != WORKFLOW_STAGE_COUNT
+        or any(stage.get("closed") for stage in applicable[:-1])
+        or not applicable[-1].get("closed")
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Odoo의 활성 문의 단계가 5단계 업무 흐름과 일치하지 않습니다.",
+        )
+    return applicable
+
+
+def get_workflow_position(ticket, workflow):
+    current_stage_id = relation_id(ticket.get("stage_id"))
+    for position, stage in enumerate(workflow):
+        if stage["id"] == current_stage_id:
+            return position
+    raise HTTPException(
+        status_code=409,
+        detail="문의의 현재 단계가 5단계 업무 흐름에 포함되지 않습니다.",
+    )
+
+
+def apply_ticket_stage(ticket_id, stage_id, message):
+    odoo.write("helpdesk.ticket", ticket_id, {"stage_id": stage_id})
+    updated = odoo.search_read(
+        model="helpdesk.ticket",
+        fields=OCA_TICKET_FIELDS,
+        domain=[["id", "=", ticket_id]],
+        limit=1,
+    )
+    if not updated or relation_id(updated[0].get("stage_id")) != stage_id:
+        raise HTTPException(
+            status_code=502,
+            detail="Odoo에서 문의 단계 변경을 확인할 수 없습니다.",
+        )
+    return {
+        "success": True,
+        "message": message,
+        "ticket": transform_oca_tickets(updated)[0],
+    }
+
+
+def post_workflow_note(ticket_id, label, content):
+    safe_content = escape(content).replace("\n", "<br>")
+    odoo.message_post(
+        "helpdesk.ticket",
+        ticket_id,
+        f"<p><strong>{label}</strong><br>{safe_content}</p>",
+    )
 
 
 @router.get("")
@@ -195,47 +315,84 @@ def update_oca_ticket(ticket_id: int, data: OcaTicketUpdate):
 
 @router.patch("/{ticket_id}/stage")
 def update_oca_ticket_stage(ticket_id: int, data: OcaTicketStageUpdate):
-    if ticket_id <= 0:
+    ticket = get_ticket_for_stage_change(ticket_id)
+    get_active_compatible_stage(data.stage_id, ticket)
+    workflow = get_ticket_workflow(ticket)
+    current_position = get_workflow_position(ticket, workflow)
+    target_positions = {
+        stage["id"]: position for position, stage in enumerate(workflow)
+    }
+    if data.stage_id not in target_positions:
         raise HTTPException(
-            status_code=400,
-            detail="올바르지 않은 문의 번호입니다.",
+            status_code=422,
+            detail="문의 팀과 회사의 5단계 업무 흐름에 포함되지 않은 단계입니다.",
         )
+    target_position = target_positions[data.stage_id]
 
-    existing = odoo.search_read(
-        model="helpdesk.ticket",
-        fields=OCA_TICKET_FIELDS,
-        domain=[["id", "=", ticket_id]],
-        limit=1,
-        context={"active_test": False},
-    )
-    if not existing:
-        raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
-
-    ticket = existing[0]
-    if not ticket.get("active"):
+    if current_position == target_position:
+        return {
+            "success": True,
+            "message": "문의가 이미 요청한 단계입니다.",
+            "ticket": transform_oca_tickets([ticket])[0],
+        }
+    if (current_position, target_position) not in {
+        (NEW_STAGE, ASSIGNED_STAGE),
+        (ASSIGNED_STAGE, IN_PROGRESS_STAGE),
+    }:
         raise HTTPException(
             status_code=409,
-            detail="보관된 문의의 단계는 변경할 수 없습니다.",
+            detail="허용되지 않은 단계 전환입니다. 업무 처리 전용 API를 사용하세요.",
         )
+    return apply_ticket_stage(ticket_id, data.stage_id, "문의 단계가 변경되었습니다.")
 
-    get_active_compatible_stage(data.stage_id, ticket)
-    if relation_id(ticket.get("stage_id")) != data.stage_id:
-        odoo.write("helpdesk.ticket", ticket_id, {"stage_id": data.stage_id})
 
-    updated = odoo.search_read(
-        model="helpdesk.ticket",
-        fields=OCA_TICKET_FIELDS,
-        domain=[["id", "=", ticket_id]],
-        limit=1,
-    )
-    if not updated or relation_id(updated[0].get("stage_id")) != data.stage_id:
+@router.post("/{ticket_id}/resolve")
+def resolve_oca_ticket(ticket_id: int, data: OcaTicketResolve):
+    ticket = get_ticket_for_stage_change(ticket_id)
+    workflow = get_ticket_workflow(ticket)
+    if get_workflow_position(ticket, workflow) != IN_PROGRESS_STAGE:
         raise HTTPException(
-            status_code=502,
-            detail="Odoo에서 문의 단계 변경을 확인할 수 없습니다.",
+            status_code=409,
+            detail="처리 중인 문의만 해결할 수 있습니다.",
         )
 
-    return {
-        "success": True,
-        "message": "문의 단계가 변경되었습니다.",
-        "ticket": transform_oca_tickets(updated)[0],
-    }
+    post_workflow_note(ticket_id, "해결 내용", data.resolution)
+    return apply_ticket_stage(
+        ticket_id,
+        workflow[RESOLVED_STAGE]["id"],
+        "문의가 해결되었습니다.",
+    )
+
+
+@router.post("/{ticket_id}/close")
+def close_oca_ticket(ticket_id: int):
+    ticket = get_ticket_for_stage_change(ticket_id)
+    workflow = get_ticket_workflow(ticket)
+    if get_workflow_position(ticket, workflow) != RESOLVED_STAGE:
+        raise HTTPException(
+            status_code=409,
+            detail="해결된 문의만 종료할 수 있습니다.",
+        )
+    return apply_ticket_stage(
+        ticket_id,
+        workflow[DONE_STAGE]["id"],
+        "문의가 종료되었습니다.",
+    )
+
+
+@router.post("/{ticket_id}/reprocess")
+def reprocess_oca_ticket(ticket_id: int, data: OcaTicketReprocess):
+    ticket = get_ticket_for_stage_change(ticket_id)
+    workflow = get_ticket_workflow(ticket)
+    if get_workflow_position(ticket, workflow) != RESOLVED_STAGE:
+        raise HTTPException(
+            status_code=409,
+            detail="해결된 문의만 재처리할 수 있습니다.",
+        )
+
+    post_workflow_note(ticket_id, "재처리 사유", data.reason)
+    return apply_ticket_stage(
+        ticket_id,
+        workflow[IN_PROGRESS_STAGE]["id"],
+        "문의가 재처리 단계로 변경되었습니다.",
+    )

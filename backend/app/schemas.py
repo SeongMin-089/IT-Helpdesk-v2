@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.constants import OCA_PRIORITY_PATTERN
 
@@ -51,3 +51,25 @@ class OcaTicketUpdate(BaseModel):
 
 class OcaTicketStageUpdate(BaseModel):
     stage_id: int = Field(gt=0)
+
+
+class OcaTicketResolve(BaseModel):
+    resolution: str = Field(min_length=1, max_length=10000)
+
+    @field_validator("resolution")
+    @classmethod
+    def validate_resolution(cls, value):
+        if not value.strip():
+            raise ValueError("해결 내용은 필수입니다.")
+        return value.strip()
+
+
+class OcaTicketReprocess(BaseModel):
+    reason: str = Field(min_length=1, max_length=10000)
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, value):
+        if not value.strip():
+            raise ValueError("재처리 사유는 필수입니다.")
+        return value.strip()
