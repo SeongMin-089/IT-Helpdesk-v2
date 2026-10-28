@@ -13,6 +13,7 @@ from app.constants import (
     OCA_PRIORITY_PATTERN,
     OCA_TICKET_FIELDS,
 )
+from app.routers import auth
 from app.routers.archive import get_oca_ticket_including_archived, get_oca_ticket_page
 from app.routers.categories import get_category_record
 from app.routers.faqs import create_faq_draft, require_faq_writes
@@ -95,6 +96,7 @@ def get_ticket_for_stage_change(ticket_id):
     )
     if not records:
         raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+    auth.ensure_ticket_owner(records[0])
     if not records[0].get("active"):
         raise HTTPException(
             status_code=409,
@@ -191,19 +193,53 @@ def post_workflow_note(ticket_id, label, content):
         "helpdesk.ticket",
         ticket_id,
         f"<p><strong>{label}</strong><br>{safe_content}</p>",
+        author_id=auth.get_current_user()["partner_id"],
     )
 
 
-def transform_ticket_message(message):
+def transform_ticket_message(message, note_subtype_id):
     return {
         "id": message["id"],
         "body": clean_description(message.get("body")),
         "author": oca_relation(message.get("author_id")),
         "created_at": message.get("date"),
-        "kind": "note" if message.get("is_internal") else "comment",
+        "kind": (
+            "note"
+            if relation_id(message.get("subtype_id")) == note_subtype_id
+            else "comment"
+        ),
         "message_type": message.get("message_type"),
         "subtype": oca_relation(message.get("subtype_id")),
     }
+
+
+def get_ticket_comment_subtypes():
+    records = odoo.search_read(
+        model="ir.model.data",
+        fields=["name", "res_id"],
+        domain=[
+            ["module", "=", "mail"],
+            ["name", "in", ["mt_comment", "mt_note"]],
+            ["model", "=", "mail.message.subtype"],
+        ],
+        limit=2,
+    )
+    subtype_ids = {record["name"]: record["res_id"] for record in records}
+    if set(subtype_ids) != {"mt_comment", "mt_note"}:
+        raise HTTPException(
+            status_code=502,
+            detail="Odoo 댓글 하위 유형을 확인할 수 없습니다.",
+        )
+    return subtype_ids
+
+
+def get_ticket_for_content_read(ticket_id):
+    if ticket_id <= 0:
+        raise HTTPException(status_code=400, detail="올바르지 않은 문의 번호입니다.")
+    ticket = get_oca_ticket_including_archived(ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+    return ticket
 
 
 def transform_ticket_attachment(attachment):
@@ -307,14 +343,17 @@ def get_oca_ticket_detail(ticket_id: int):
         fields=OCA_TICKET_FIELDS,
         domain=[["id", "=", ticket_id]],
         limit=1,
+        context={"active_test": False},
     )
     if not records:
         raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+    auth.ensure_ticket_owner(records[0])
     return {"success": True, "ticket": transform_oca_tickets(records)[0]}
 
 
 @router.post("", status_code=201)
 def create_oca_ticket(data: OcaTicketCreate):
+    user = auth.get_current_user()
     title = data.title.strip()
     description = data.description.strip()
     if not title or not description:
@@ -327,6 +366,7 @@ def create_oca_ticket(data: OcaTicketCreate):
         "name": title,
         "description": escape(description).replace("\n", "<br>"),
         "priority": data.priority,
+        "partner_id": user["partner_id"],
     }
     auto_assignee = None
 
@@ -370,14 +410,35 @@ def update_oca_ticket(ticket_id: int, data: OcaTicketUpdate):
             detail="올바르지 않은 문의 번호입니다.",
         )
 
-    existing = odoo.search_read(
+    existing_records = odoo.search_read(
         model="helpdesk.ticket",
-        fields=["id"],
+        fields=OCA_TICKET_FIELDS,
         domain=[["id", "=", ticket_id]],
         limit=1,
+        context={"active_test": False},
     )
-    if not existing:
+    if not existing_records:
         raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+    existing = existing_records[0]
+    auth.ensure_ticket_owner(existing)
+    if not existing.get("active") or existing.get("closed"):
+        raise HTTPException(status_code=409, detail="종료·보관 문의는 수정할 수 없습니다.")
+
+    user = auth.get_current_user()
+    original_fields_requested = data.title is not None or data.description is not None
+    management_fields_requested = (
+        data.priority is not None or "assignee_id" in data.model_fields_set
+    )
+    if original_fields_requested:
+        auth.require_ticket_owner(existing)
+        workflow = get_ticket_workflow(existing)
+        if get_workflow_position(existing, workflow) not in {NEW_STAGE, ASSIGNED_STAGE}:
+            raise HTTPException(
+                status_code=409,
+                detail="접수 또는 배정 단계의 본인 문의만 원본 정보를 수정할 수 있습니다.",
+            )
+    if management_fields_requested and user["role"] != "agent":
+        raise HTTPException(status_code=403, detail="IT 담당자 권한이 필요합니다.")
 
     values = {}
     if data.title is not None:
@@ -424,6 +485,7 @@ def update_oca_ticket(ticket_id: int, data: OcaTicketUpdate):
 
 @router.patch("/{ticket_id}/stage")
 def update_oca_ticket_stage(ticket_id: int, data: OcaTicketStageUpdate):
+    auth.require_agent()
     ticket = get_ticket_for_stage_change(ticket_id)
     get_active_compatible_stage(data.stage_id, ticket)
     workflow = get_ticket_workflow(ticket)
@@ -457,6 +519,7 @@ def update_oca_ticket_stage(ticket_id: int, data: OcaTicketStageUpdate):
 
 @router.post("/{ticket_id}/resolve")
 def resolve_oca_ticket(ticket_id: int, data: OcaTicketResolve):
+    auth.require_agent()
     ticket = get_ticket_for_stage_change(ticket_id)
     workflow = get_ticket_workflow(ticket)
     if get_workflow_position(ticket, workflow) != IN_PROGRESS_STAGE:
@@ -476,6 +539,7 @@ def resolve_oca_ticket(ticket_id: int, data: OcaTicketResolve):
 @router.post("/{ticket_id}/close")
 def close_oca_ticket(ticket_id: int):
     ticket = get_ticket_for_stage_change(ticket_id)
+    auth.require_ticket_owner(ticket)
     workflow = get_ticket_workflow(ticket)
     if get_workflow_position(ticket, workflow) != RESOLVED_STAGE:
         raise HTTPException(
@@ -492,6 +556,7 @@ def close_oca_ticket(ticket_id: int):
 @router.post("/{ticket_id}/reprocess")
 def reprocess_oca_ticket(ticket_id: int, data: OcaTicketReprocess):
     ticket = get_ticket_for_stage_change(ticket_id)
+    auth.require_ticket_owner(ticket)
     workflow = get_ticket_workflow(ticket)
     if get_workflow_position(ticket, workflow) != RESOLVED_STAGE:
         raise HTTPException(
@@ -509,7 +574,22 @@ def reprocess_oca_ticket(ticket_id: int, data: OcaTicketReprocess):
 
 @router.get("/{ticket_id}/comments")
 def get_oca_ticket_comments(ticket_id: int):
-    get_ticket_for_stage_change(ticket_id)
+    get_ticket_for_content_read(ticket_id)
+    subtype_ids = get_ticket_comment_subtypes()
+    user = auth.get_current_user()
+    visible_subtype_ids = (
+        list(subtype_ids.values())
+        if user["role"] == "agent"
+        else [subtype_ids["mt_comment"]]
+    )
+    message_domain = [
+        ["model", "=", "helpdesk.ticket"],
+        ["res_id", "=", ticket_id],
+        ["message_type", "=", "comment"],
+        ["subtype_id", "in", visible_subtype_ids],
+    ]
+    if user["role"] != "agent":
+        message_domain.append(["is_internal", "=", False])
     messages = odoo.search_read(
         model="mail.message",
         fields=[
@@ -519,16 +599,14 @@ def get_oca_ticket_comments(ticket_id: int):
             "date",
             "message_type",
             "subtype_id",
-            "is_internal",
         ],
-        domain=[
-            ["model", "=", "helpdesk.ticket"],
-            ["res_id", "=", ticket_id],
-            ["message_type", "=", "comment"],
-        ],
+        domain=message_domain,
         limit=100,
     )
-    comments = [transform_ticket_message(message) for message in messages]
+    comments = [
+        transform_ticket_message(message, subtype_ids["mt_note"])
+        for message in messages
+    ]
     return {"success": True, "count": len(comments), "comments": comments}
 
 
@@ -614,6 +692,9 @@ def get_oca_ticket_history(
 def create_oca_ticket_comment(ticket_id: int, data: OcaTicketCommentCreate):
     ticket = get_ticket_for_stage_change(ticket_id)
     ensure_ticket_accepts_content(ticket)
+    user = auth.get_current_user()
+    if data.kind == "note" and user["role"] != "agent":
+        raise HTTPException(status_code=403, detail="내부 메모는 IT 담당자만 작성할 수 있습니다.")
     safe_body = escape(data.body).replace("\n", "<br>")
     subtype_xmlid = "mail.mt_note" if data.kind == "note" else "mail.mt_comment"
     message_id = odoo.message_post(
@@ -621,6 +702,7 @@ def create_oca_ticket_comment(ticket_id: int, data: OcaTicketCommentCreate):
         ticket_id,
         f"<p>{safe_body}</p>",
         subtype_xmlid=subtype_xmlid,
+        author_id=user["partner_id"],
     )
     return {
         "success": True,
@@ -632,7 +714,7 @@ def create_oca_ticket_comment(ticket_id: int, data: OcaTicketCommentCreate):
 
 @router.get("/{ticket_id}/attachments")
 def get_oca_ticket_attachments(ticket_id: int):
-    get_ticket_for_stage_change(ticket_id)
+    get_ticket_for_content_read(ticket_id)
     records = odoo.search_read(
         model="ir.attachment",
         fields=[
@@ -693,7 +775,7 @@ def upload_oca_ticket_attachment(
 
 @router.get("/{ticket_id}/attachments/{attachment_id}/download")
 def download_oca_ticket_attachment(ticket_id: int, attachment_id: int):
-    get_ticket_for_stage_change(ticket_id)
+    get_ticket_for_content_read(ticket_id)
     if attachment_id <= 0:
         raise HTTPException(status_code=400, detail="올바르지 않은 첨부 번호입니다.")
 
@@ -734,6 +816,7 @@ def download_oca_ticket_attachment(ticket_id: int, attachment_id: int):
 
 @router.post("/{ticket_id}/faq-drafts", status_code=201)
 def create_faq_draft_from_ticket(ticket_id: int):
+    auth.require_agent()
     require_faq_writes()
     ticket = get_ticket_for_stage_change(ticket_id)
     workflow = get_ticket_workflow(ticket)

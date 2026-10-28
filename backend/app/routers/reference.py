@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.constants import OCA_PRIORITY_LABELS, OCA_TICKET_FIELDS
+from app.routers import auth
 from app.services import odoo
 from app.transformers import transform_oca_tickets
 
@@ -21,6 +22,9 @@ def get_oca_stages():
 @router.get("/dashboard")
 def get_oca_dashboard():
     active_domain = [["active", "=", True]]
+    user = auth.get_current_user()
+    if user["role"] != "agent":
+        active_domain.append(["partner_id", "=", user["partner_id"]])
     summary = {
         "total": odoo.search_count("helpdesk.ticket", domain=active_domain),
         "open": odoo.search_count(

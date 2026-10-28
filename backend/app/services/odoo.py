@@ -20,7 +20,13 @@ def _ensure_api_key():
         )
 
 
-def _session_jsonrpc(path, params, session_id=None, authentication=False):
+def _session_jsonrpc(
+    path,
+    params,
+    session_id=None,
+    authentication=False,
+    allow_missing_result=False,
+):
     cookies = {"session_id": session_id} if session_id else None
     try:
         response = requests.post(
@@ -59,6 +65,8 @@ def _session_jsonrpc(path, params, session_id=None, authentication=False):
             raise HTTPException(status_code=403, detail="Odoo session access denied")
         raise HTTPException(status_code=502, detail="Odoo session request failed")
     if "result" not in payload:
+        if allow_missing_result:
+            return None, response
         raise HTTPException(status_code=502, detail="Invalid Odoo session response")
     return payload["result"], response
 
@@ -107,6 +115,7 @@ def destroy_session(session_id):
         {},
         session_id=session_id,
         authentication=True,
+        allow_missing_result=True,
     )
 
 
@@ -293,19 +302,23 @@ def message_post(
     record_id,
     body,
     subtype_xmlid="mail.mt_note",
+    author_id=None,
 ):
     _ensure_api_key()
     try:
+        payload = {
+            "ids": [record_id],
+            "body": body,
+            "body_is_html": True,
+            "message_type": "comment",
+            "subtype_xmlid": subtype_xmlid,
+        }
+        if author_id is not None:
+            payload["author_id"] = author_id
         response = requests.post(
             f"{config.ODOO_URL}/json/2/{model}/message_post",
             headers=_headers(),
-            json={
-                "ids": [record_id],
-                "body": body,
-                "body_is_html": True,
-                "message_type": "comment",
-                "subtype_xmlid": subtype_xmlid,
-            },
+            json=payload,
             timeout=15,
         )
         response.raise_for_status()

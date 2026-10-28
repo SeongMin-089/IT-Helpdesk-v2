@@ -1,7 +1,9 @@
 import re
+from contextvars import ContextVar
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app import config
 from app.schemas import AuthLogin
@@ -19,6 +21,7 @@ GROUPS = {
     "helpdesk_user": "helpdesk_mgmt.group_helpdesk_user",
     "helpdesk_manager": "helpdesk_mgmt.group_helpdesk_manager",
 }
+CURRENT_USER = ContextVar("it_helpdesk_current_user", default=None)
 
 
 def require_trusted_origin(request):
@@ -99,6 +102,8 @@ def get_verified_user(session_id):
 
     user = records[0]
     partner = oca_relation(user.get("partner_id"))
+    if partner is None:
+        raise HTTPException(status_code=403, detail="연결된 Odoo 연락처가 없습니다.")
     return {
         "id": user["id"],
         "name": user.get("name") or "",
@@ -107,6 +112,59 @@ def get_verified_user(session_id):
         "role": "agent" if is_agent else "employee",
         "groups": groups,
     }
+
+
+async def require_authenticated_user(request: Request):
+    session_id = get_cookie_session(request)
+    user = await run_in_threadpool(get_verified_user, session_id)
+    request.state.auth_user = user
+    token = CURRENT_USER.set(user)
+    try:
+        yield user
+    finally:
+        CURRENT_USER.reset(token)
+
+
+def get_current_user():
+    user = CURRENT_USER.get()
+    if user is None:
+        raise HTTPException(status_code=401, detail="인증이 필요합니다.")
+    return user
+
+
+def require_agent():
+    user = get_current_user()
+    if user["role"] != "agent":
+        raise HTTPException(status_code=403, detail="IT 담당자 권한이 필요합니다.")
+    return user
+
+
+def ensure_ticket_owner(ticket, conceal=True):
+    user = get_current_user()
+    if user["role"] == "agent":
+        return user
+    if not is_ticket_owner(ticket, user):
+        raise HTTPException(
+            status_code=404 if conceal else 403,
+            detail="문의를 찾을 수 없습니다." if conceal else "문의 접근 권한이 없습니다.",
+        )
+    return user
+
+
+def is_ticket_owner(ticket, user=None):
+    user = user or get_current_user()
+    partner_id = ticket.get("partner_id")
+    ticket_partner_id = partner_id[0] if isinstance(partner_id, (list, tuple)) else partner_id
+    return ticket_partner_id == user["partner_id"]
+
+
+def require_ticket_owner(ticket, conceal=True):
+    if not is_ticket_owner(ticket):
+        raise HTTPException(
+            status_code=404 if conceal else 403,
+            detail="문의를 찾을 수 없습니다." if conceal else "문의 접근 권한이 없습니다.",
+        )
+    return get_current_user()
 
 
 @router.post("/login")

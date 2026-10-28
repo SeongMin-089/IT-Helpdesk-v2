@@ -6,8 +6,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException, Response
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from starlette.datastructures import Headers
 from starlette.requests import Request
+from starlette.middleware.cors import CORSMiddleware
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -30,6 +33,32 @@ from app.schemas import (  # noqa: E402
     AuthLogin,
 )
 from app.services import odoo  # noqa: E402
+
+
+TEST_AGENT = {
+    "id": 7,
+    "name": "Agent Kim",
+    "partner_id": 9,
+    "partner": {"id": 9, "name": "Agent Partner"},
+    "role": "agent",
+    "groups": {},
+}
+TEST_EMPLOYEE_A = {
+    "id": 20,
+    "name": "Employee A",
+    "partner_id": 9,
+    "partner": {"id": 9, "name": "Requester Lee"},
+    "role": "employee",
+    "groups": {},
+}
+TEST_EMPLOYEE_B = {
+    "id": 21,
+    "name": "Employee B",
+    "partner_id": 10,
+    "partner": {"id": 10, "name": "Requester Park"},
+    "role": "employee",
+    "groups": {},
+}
 
 
 def make_auth_request(method, session_id=None, origin="http://localhost:5173"):
@@ -380,6 +409,12 @@ class MemoryOdoo:
                 },
                 {
                     "module": "mail",
+                    "name": "mt_comment",
+                    "model": "mail.message.subtype",
+                    "res_id": 1,
+                },
+                {
+                    "module": "mail",
                     "name": "mt_note",
                     "model": "mail.message.subtype",
                     "res_id": 2,
@@ -608,6 +643,7 @@ class MemoryOdoo:
         record_id,
         body,
         subtype_xmlid="mail.mt_note",
+        author_id=None,
     ):
         if model != "helpdesk.ticket" or record_id not in self.tickets:
             raise AssertionError("Unexpected message_post")
@@ -617,7 +653,7 @@ class MemoryOdoo:
         self.mail_messages[message_id] = {
             "id": message_id,
             "body": body,
-            "author_id": [7, "Agent Kim"],
+            "author_id": [author_id or 7, "Authenticated Author"],
             "date": "2026-10-27 04:00:00",
             "message_type": "comment",
             "subtype_id": [
@@ -795,9 +831,119 @@ class AuthApiTests(unittest.TestCase):
         self.destroy_mock.assert_called_once_with(self.SESSION_ID)
         self.assertIn("Max-Age=0", response.headers["set-cookie"])
 
+    def test_http_login_me_logout_and_cors_preflight(self):
+        origin = "http://localhost:5173"
+        cors = CORSMiddleware(
+            main.app.router,
+            allow_origins=list(config.AUTH_ALLOWED_ORIGINS),
+            allow_credentials=True,
+            allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type"],
+        )
+        response = cors.preflight_response(
+            Headers(
+                {
+                "origin": origin,
+                "access-control-request-method": "POST",
+                "access-control-request-headers": "content-type",
+                }
+            )
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], origin)
+        self.assertEqual(response.headers["access-control-allow-credentials"], "true")
+
+        logged_in, login_response = self.login()
+        self.assertEqual(logged_in["user"]["id"], 7)
+        me_result = auth.me(make_auth_request("GET", session_id=self.SESSION_ID))
+        self.assertEqual(me_result["user"]["partner_id"], 9)
+        logout_response = Response()
+        logged_out = auth.logout(
+            make_auth_request("POST", session_id=self.SESSION_ID), logout_response
+        )
+        self.assertTrue(logged_out["success"])
+        self.assertIn("Secure", login_response.headers["set-cookie"])
+        self.assertIn("Max-Age=0", logout_response.headers["set-cookie"])
+        self.destroy_mock.assert_called_once_with(self.SESSION_ID)
+
+    def test_testclient_authentication_cors_and_role_flow(self):
+        memory = MemoryOdoo()
+        origin = "http://localhost:5173"
+        with (
+            patch.object(config, "AUTH_COOKIE_SECURE", False),
+            patch.object(odoo, "search_read", side_effect=memory.search_read),
+            patch.object(odoo, "search_count", side_effect=memory.search_count),
+            TestClient(main.app, base_url="http://testserver") as client,
+        ):
+            preflight = client.options(
+                "/api/auth/login",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+            self.assertEqual(preflight.status_code, 200)
+            self.assertEqual(preflight.headers["access-control-allow-origin"], origin)
+            self.assertEqual(
+                preflight.headers["access-control-allow-credentials"], "true"
+            )
+
+            login = client.post(
+                "/api/auth/login",
+                json={"login": "employee", "password": "not-returned"},
+                headers={"Origin": origin},
+            )
+            self.assertEqual(login.status_code, 200)
+            self.assertEqual(login.json()["user"]["role"], "employee")
+            self.assertIn(config.AUTH_COOKIE_NAME, client.cookies)
+            self.assertEqual(client.get("/api/auth/me").status_code, 200)
+            self.assertEqual(client.get("/api/oca/tickets").status_code, 200)
+            self.assertEqual(client.get("/api/oca/assignees").status_code, 403)
+
+            blocked = client.post(
+                "/api/oca/tickets",
+                json={"title": "Blocked", "description": "Blocked"},
+                headers={"Origin": "https://evil.example"},
+            )
+            self.assertEqual(blocked.status_code, 403)
+
+            self.groups.add("helpdesk_mgmt.group_helpdesk_user")
+            self.assertEqual(client.get("/api/oca/assignees").status_code, 200)
+
+            logout = client.post(
+                "/api/auth/logout",
+                headers={"Origin": origin},
+            )
+            self.assertEqual(logout.status_code, 200)
+            self.assertEqual(client.get("/api/auth/me").status_code, 401)
+            self.assertEqual(client.get("/api/oca/tickets").status_code, 401)
+
+    def test_http_state_change_rejects_untrusted_origin_and_oca_requires_session(self):
+        request = make_auth_request(
+            "POST", origin="https://evil.example"
+        )
+        request.scope["path"] = "/api/oca/tickets"
+        with self.assertRaises(HTTPException) as caught:
+            auth.require_trusted_origin(request)
+        self.assertEqual(caught.exception.status_code, 403)
+
+        request = make_auth_request("GET", origin=None)
+        with self.assertRaises(HTTPException) as caught:
+            auth.get_cookie_session(request)
+        self.assertEqual(caught.exception.status_code, 401)
+
+    def test_legacy_ticket_routes_are_not_exposed_but_root_remains(self):
+        paths = set(main.app.openapi()["paths"])
+        self.assertNotIn("/api/tickets", paths)
+        self.assertNotIn("/api/tickets/{ticket_id}", paths)
+        self.assertIn("/", paths)
+        self.assertEqual(legacy.root()["status"], "running")
+
 
 class OcaTicketApiTests(unittest.TestCase):
     def setUp(self):
+        self.auth_token = auth.CURRENT_USER.set(TEST_AGENT)
         self.odoo = MemoryOdoo()
         self.search_patch = patch.object(
             odoo, "search_read", side_effect=self.odoo.search_read
@@ -818,6 +964,10 @@ class OcaTicketApiTests(unittest.TestCase):
 
     def tearDown(self):
         patch.stopall()
+        auth.CURRENT_USER.reset(self.auth_token)
+
+    def set_user(self, user):
+        return auth.CURRENT_USER.set(user)
 
     def add_tracking(
         self,
@@ -1089,16 +1239,68 @@ class OcaTicketApiTests(unittest.TestCase):
         ):
             self.assertEqual(after[field], before[field])
 
-    def test_archived_ticket_cannot_be_read_or_updated_until_restored(self):
+    def test_agent_can_archive_and_restore_other_requesters_closed_ticket(self):
+        self.odoo.tickets[1].update(
+            {
+                "partner_id": [10, "Requester Park"],
+                "stage_id": [5, "Done"],
+                "closed": True,
+            }
+        )
+
+        archived = archive.archive_oca_ticket(1)
+        restored = archive.restore_oca_ticket(1)
+
+        self.assertFalse(archived["ticket"]["active"])
+        self.assertTrue(restored["ticket"]["active"])
+        self.assertTrue(restored["ticket"]["closed"])
+        self.assertEqual(restored["ticket"]["requester"]["id"], 10)
+
+    def test_employee_archive_restore_requires_own_new_or_assigned_ticket(self):
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            archived = archive.archive_oca_ticket(1)
+            restored = archive.restore_oca_ticket(1)
+            self.assertFalse(archived["ticket"]["active"])
+            self.assertTrue(restored["ticket"]["active"])
+
+            self.odoo.tickets[1]["stage_id"] = [4, "Resolved"]
+            with self.assertRaises(HTTPException) as caught:
+                archive.archive_oca_ticket(1)
+            self.assertEqual(caught.exception.status_code, 409)
+
+            self.odoo.tickets[1]["stage_id"] = [2, "Assigned"]
+            self.odoo.tickets[1]["partner_id"] = [10, "Requester Park"]
+            with self.assertRaises(HTTPException) as caught:
+                archive.archive_oca_ticket(1)
+            self.assertEqual(caught.exception.status_code, 404)
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+    def test_archived_ticket_detail_keeps_ownership_and_update_stays_blocked(self):
         archive.archive_oca_ticket(1)
 
-        with self.assertRaises(HTTPException) as read_error:
-            tickets.get_oca_ticket_detail(1)
-        self.assertEqual(read_error.exception.status_code, 404)
+        detail = tickets.get_oca_ticket_detail(1)
+        self.assertFalse(detail["ticket"]["active"])
+        self.assertEqual(self.search_mock.call_args.kwargs["context"], {"active_test": False})
+
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            self.assertEqual(tickets.get_oca_ticket_detail(1)["ticket"]["id"], 1)
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        token = self.set_user(TEST_EMPLOYEE_B)
+        try:
+            with self.assertRaises(HTTPException) as read_error:
+                tickets.get_oca_ticket_detail(1)
+            self.assertEqual(read_error.exception.status_code, 404)
+        finally:
+            auth.CURRENT_USER.reset(token)
 
         with self.assertRaises(HTTPException) as update_error:
             tickets.update_oca_ticket(1, OcaTicketUpdate(title="Changed"))
-        self.assertEqual(update_error.exception.status_code, 404)
+        self.assertEqual(update_error.exception.status_code, 409)
 
         archive.restore_oca_ticket(1)
         result = tickets.update_oca_ticket(1, OcaTicketUpdate(title="Changed"))
@@ -1410,7 +1612,7 @@ class OcaTicketApiTests(unittest.TestCase):
             {item["kind"] for item in result["comments"]},
             {"comment", "note"},
         )
-        self.assertEqual(result["comments"][0]["author"]["id"], 7)
+        self.assertEqual(result["comments"][0]["author"]["id"], 9)
         self.assertEqual(result["comments"][0]["message_type"], "comment")
         self.assertEqual(
             self.message_mock.call_args_list[0].kwargs["subtype_xmlid"],
@@ -1610,27 +1812,87 @@ class OcaTicketApiTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.status_code, 502)
 
-    def test_comments_and_attachments_require_active_ticket(self):
+    def test_archived_ticket_allows_content_reads_but_rejects_writes(self):
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p>Existing comment</p>",
+            subtype_xmlid="mail.mt_comment",
+        )
         archive.archive_oca_ticket(1)
 
-        operations = (
-            lambda: tickets.get_oca_ticket_comments(1),
-            lambda: tickets.get_oca_ticket_attachments(1),
-            lambda: tickets.create_oca_ticket_comment(
-                1, OcaTicketCommentCreate(body="Comment")
-            ),
-            lambda: tickets.upload_oca_ticket_attachment(
-                1,
-                filename="file.txt",
-                content_type="text/plain",
-                file_data=b"data",
-            ),
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            comments = tickets.get_oca_ticket_comments(1)
+            attachments = tickets.get_oca_ticket_attachments(1)
+            download = tickets.download_oca_ticket_attachment(1, 50)
+            self.assertEqual(comments["count"], 1)
+            self.assertEqual(attachments["count"], 1)
+            self.assertEqual(download.body, b"error")
+
+            write_operations = (
+                lambda: tickets.create_oca_ticket_comment(
+                    1, OcaTicketCommentCreate(body="Comment")
+                ),
+                lambda: tickets.upload_oca_ticket_attachment(
+                    1,
+                    filename="file.txt",
+                    content_type="text/plain",
+                    file_data=b"data",
+                ),
+            )
+            for operation in write_operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaises(HTTPException) as caught:
+                        operation()
+                    self.assertEqual(caught.exception.status_code, 409)
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+    def test_employee_cannot_read_internal_note_subtype(self):
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p>Public comment</p>",
+            subtype_xmlid="mail.mt_comment",
         )
-        for operation in operations:
-            with self.subTest(operation=operation):
-                with self.assertRaises(HTTPException) as caught:
-                    operation()
-                self.assertEqual(caught.exception.status_code, 409)
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p>Internal note</p>",
+            subtype_xmlid="mail.mt_note",
+        )
+        self.odoo.mail_messages[max(self.odoo.mail_messages)]["is_internal"] = False
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p>Internal comment</p>",
+            subtype_xmlid="mail.mt_comment",
+        )
+        self.odoo.mail_messages[max(self.odoo.mail_messages)]["is_internal"] = True
+
+        agent_result = tickets.get_oca_ticket_comments(1)
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            employee_result = tickets.get_oca_ticket_comments(1)
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        self.assertEqual(
+            {item["kind"] for item in agent_result["comments"]},
+            {"comment", "note"},
+        )
+        self.assertEqual(employee_result["count"], 1)
+        self.assertEqual(employee_result["comments"][0]["kind"], "comment")
+        employee_message_call = self.search_mock.call_args_list[-1]
+        self.assertIn(
+            ["subtype_id", "in", [1]],
+            employee_message_call.kwargs["domain"],
+        )
+        self.assertIn(
+            ["is_internal", "=", False],
+            employee_message_call.kwargs["domain"],
+        )
 
     def test_closed_ticket_rejects_comment_note_and_attachment_upload(self):
         self.odoo.tickets[1]["stage_id"] = [5, "Done"]
@@ -1681,6 +1943,7 @@ class OcaTicketApiTests(unittest.TestCase):
 
 class DashboardApiTests(unittest.TestCase):
     def setUp(self):
+        self.auth_token = auth.CURRENT_USER.set(TEST_AGENT)
         self.odoo = MemoryOdoo()
         self.search_mock = patch.object(
             odoo, "search_read", side_effect=self.odoo.search_read
@@ -1696,6 +1959,7 @@ class DashboardApiTests(unittest.TestCase):
 
     def tearDown(self):
         patch.stopall()
+        auth.CURRENT_USER.reset(self.auth_token)
 
     def test_dashboard_returns_summary_groups_and_recent_tickets(self):
         closed = copy.deepcopy(self.odoo.tickets[1])
@@ -1772,9 +2036,32 @@ class DashboardApiTests(unittest.TestCase):
         )
         self.assertEqual(result["recent_tickets"], [])
 
+    def test_employee_dashboard_is_scoped_to_verified_requester(self):
+        other = copy.deepcopy(self.odoo.tickets[1])
+        other.update({"id": 2, "partner_id": [10, "Requester Park"]})
+        self.odoo.tickets[2] = other
+        token = auth.CURRENT_USER.set(TEST_EMPLOYEE_A)
+        try:
+            result = reference.get_oca_dashboard()
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        self.assertEqual(result["summary"]["total"], 1)
+        expected = ["partner_id", "=", TEST_EMPLOYEE_A["partner_id"]]
+        for call in self.count_mock.call_args_list:
+            self.assertIn(expected, call.kwargs["domain"])
+        for call in self.group_mock.call_args_list:
+            self.assertIn(expected, call.kwargs["domain"])
+        recent_calls = [
+            call for call in self.search_mock.call_args_list
+            if call.kwargs.get("model") == "helpdesk.ticket"
+        ]
+        self.assertIn(expected, recent_calls[-1].kwargs["domain"])
+
 
 class FaqApiTests(unittest.TestCase):
     def setUp(self):
+        self.auth_token = auth.CURRENT_USER.set(TEST_AGENT)
         self.odoo = MemoryOdoo()
         self.search_patch = patch.object(
             odoo, "search_read", side_effect=self.odoo.search_read
@@ -1800,6 +2087,7 @@ class FaqApiTests(unittest.TestCase):
 
     def tearDown(self):
         patch.stopall()
+        auth.CURRENT_USER.reset(self.auth_token)
 
     def test_public_list_and_detail_exclude_drafts_and_archived_pages(self):
         result = faqs.get_public_faqs(limit=50)
@@ -1812,6 +2100,24 @@ class FaqApiTests(unittest.TestCase):
             with self.assertRaises(HTTPException) as caught:
                 faqs.get_public_faq(faq_id)
             self.assertEqual(caught.exception.status_code, 404)
+
+    def test_employee_can_read_public_faq_but_cannot_manage_or_read_private_faq(self):
+        token = auth.CURRENT_USER.set(TEST_EMPLOYEE_A)
+        try:
+            self.assertEqual(faqs.get_public_faq(110)["faq"]["id"], 110)
+            with self.assertRaises(HTTPException) as caught:
+                faqs.get_public_faq(111)
+            self.assertEqual(caught.exception.status_code, 404)
+            with self.assertRaises(HTTPException) as caught:
+                faqs.get_all_faqs()
+            self.assertEqual(caught.exception.status_code, 403)
+            with self.assertRaises(HTTPException) as caught:
+                faqs.create_faq(
+                    OcaFaqCreate(name="Forbidden", content="Forbidden", tag_ids=[])
+                )
+            self.assertEqual(caught.exception.status_code, 403)
+        finally:
+            auth.CURRENT_USER.reset(token)
 
     def test_suggestions_search_title_content_and_tag_and_limit_results(self):
         self.odoo.document_pages[113] = {
@@ -1976,15 +2282,24 @@ class FaqApiTests(unittest.TestCase):
 
 class CategoryApiTests(unittest.TestCase):
     def setUp(self):
+        self.auth_token = auth.CURRENT_USER.set(TEST_AGENT)
         self.odoo = MemoryOdoo()
         patch.object(
             odoo, "search_read", side_effect=self.odoo.search_read
         ).start()
+        self.count_mock = patch.object(
+            odoo, "search_count", side_effect=self.odoo.search_count
+        ).start()
         patch.object(odoo, "write", side_effect=self.odoo.write).start()
         patch.object(odoo, "create", side_effect=self.odoo.create).start()
+        patch.object(odoo, "message_post", side_effect=self.odoo.message_post).start()
 
     def tearDown(self):
         patch.stopall()
+        auth.CURRENT_USER.reset(self.auth_token)
+
+    def set_user(self, user):
+        return auth.CURRENT_USER.set(user)
 
     def test_category_create_update_and_list(self):
         created = categories.create_oca_category(OcaCategoryCreate(name="Network"))
@@ -2001,6 +2316,25 @@ class CategoryApiTests(unittest.TestCase):
         self.assertFalse(updated["category"]["show_in_portal"])
         self.assertIn(category_id, [category["id"] for category in listed])
         self.assertEqual(detail["name"], "Network Support")
+
+    def test_employee_cannot_manage_categories(self):
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            self.assertGreater(categories.get_oca_categories()["count"], 0)
+            for action in (
+                lambda: categories.get_all_oca_categories(),
+                lambda: categories.create_oca_category(OcaCategoryCreate(name="No")),
+                lambda: categories.update_oca_category(
+                    10, OcaCategoryUpdate(name="No")
+                ),
+                lambda: categories.archive_oca_category(10),
+            ):
+                with self.subTest(action=action):
+                    with self.assertRaises(HTTPException) as caught:
+                        action()
+                    self.assertEqual(caught.exception.status_code, 403)
+        finally:
+            auth.CURRENT_USER.reset(token)
 
     def test_inactive_category_cannot_be_selected_for_new_ticket(self):
         categories.archive_oca_category(10)
@@ -2100,6 +2434,110 @@ class CategoryApiTests(unittest.TestCase):
         self.assertEqual(len(self.odoo.parameters), 1)
 
 
+    def test_employee_list_scope_cannot_be_overridden_by_partner_filter(self):
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            result = archive.get_oca_ticket_page(
+                active=True, partner_id=TEST_EMPLOYEE_B["partner_id"]
+            )
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        self.assertEqual(result["total"], 0)
+        domain = self.count_mock.call_args.kwargs["domain"]
+        self.assertIn(["partner_id", "=", TEST_EMPLOYEE_B["partner_id"]], domain)
+        self.assertIn(["partner_id", "=", TEST_EMPLOYEE_A["partner_id"]], domain)
+
+    def test_employee_direct_access_and_attachment_download_conceal_other_ticket(self):
+        token = self.set_user(TEST_EMPLOYEE_B)
+        try:
+            for action in (
+                lambda: tickets.get_oca_ticket_detail(1),
+                lambda: tickets.get_oca_ticket_comments(1),
+                lambda: tickets.get_oca_ticket_history(1),
+                lambda: tickets.download_oca_ticket_attachment(1, 50),
+            ):
+                with self.subTest(action=action):
+                    with self.assertRaises(HTTPException) as caught:
+                        action()
+                    self.assertEqual(caught.exception.status_code, 404)
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+    def test_creation_and_comment_author_use_verified_partner(self):
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            created = tickets.create_oca_ticket(
+                OcaTicketCreate(title="Own ticket", description="Own description")
+            )
+            comment = tickets.create_oca_ticket_comment(
+                1, OcaTicketCommentCreate(body="Owner comment", kind="comment")
+            )
+            with self.assertRaises(HTTPException) as caught:
+                tickets.create_oca_ticket_comment(
+                    1, OcaTicketCommentCreate(body="Hidden note", kind="note")
+                )
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        self.assertEqual(created["ticket_id"], 2)
+        self.assertEqual(self.odoo.created_ticket_values["partner_id"], 9)
+        self.assertEqual(comment["comment_id"], 201)
+        self.assertEqual(self.odoo.mail_messages[201]["author_id"][0], 9)
+        self.assertEqual(caught.exception.status_code, 403)
+
+    def test_original_and_management_updates_follow_requester_and_agent_roles(self):
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            result = tickets.update_oca_ticket(1, OcaTicketUpdate(title="Owner edit"))
+            with self.assertRaises(HTTPException) as caught:
+                tickets.update_oca_ticket(1, OcaTicketUpdate(priority="2"))
+        finally:
+            auth.CURRENT_USER.reset(token)
+        self.assertEqual(result["ticket"]["title"], "Owner edit")
+        self.assertEqual(caught.exception.status_code, 403)
+
+        self.odoo.tickets[1]["partner_id"] = [10, "Requester Park"]
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket(1, OcaTicketUpdate(title="Agent edit"))
+        self.assertEqual(caught.exception.status_code, 404)
+        result = tickets.update_oca_ticket(1, OcaTicketUpdate(priority="2"))
+        self.assertEqual(self.odoo.tickets[1]["priority"], "2")
+
+    def test_only_agent_changes_workflow_but_only_requester_closes_or_reprocesses(self):
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=3))
+            self.assertEqual(caught.exception.status_code, 403)
+            with self.assertRaises(HTTPException) as caught:
+                tickets.resolve_oca_ticket(
+                    1, OcaTicketResolve(resolution="Employee bypass")
+                )
+            self.assertEqual(caught.exception.status_code, 403)
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        self.odoo.tickets[1]["stage_id"] = [4, "Resolved"]
+        self.odoo.tickets[1]["partner_id"] = [10, "Requester Park"]
+        with self.assertRaises(HTTPException) as caught:
+            tickets.close_oca_ticket(1)
+        self.assertEqual(caught.exception.status_code, 404)
+
+        token = self.set_user(TEST_EMPLOYEE_B)
+        try:
+            closed = tickets.close_oca_ticket(1)
+            self.odoo.tickets[1]["stage_id"] = [4, "Resolved"]
+            self.odoo.tickets[1]["closed"] = False
+            reprocessed = tickets.reprocess_oca_ticket(
+                1, OcaTicketReprocess(reason="Still broken")
+            )
+        finally:
+            auth.CURRENT_USER.reset(token)
+        self.assertEqual(closed["ticket"]["status"]["id"], 5)
+        self.assertEqual(reprocessed["ticket"]["status"]["id"], 3)
+
+
 class OdooJson2Tests(unittest.TestCase):
     def test_session_authentication_does_not_use_api_key(self):
         response = Mock()
@@ -2179,6 +2617,30 @@ class OdooJson2Tests(unittest.TestCase):
                 odoo.get_session_info("A" * 84)
 
         self.assertEqual(caught.exception.status_code, 401)
+
+    def test_destroy_session_accepts_normal_response_without_result(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"jsonrpc": "2.0", "id": None}
+
+        with patch.object(odoo.requests, "post", return_value=response) as post:
+            odoo.destroy_session("A" * 84)
+
+        self.assertTrue(
+            post.call_args.args[0].endswith("/web/session/destroy")
+        )
+
+    def test_non_logout_session_call_still_requires_result(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"jsonrpc": "2.0", "id": None}
+
+        with patch.object(odoo.requests, "post", return_value=response):
+            with self.assertRaises(HTTPException) as caught:
+                odoo.get_session_info("A" * 84)
+
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(caught.exception.detail, "Invalid Odoo session response")
 
     def test_search_read_sends_context_as_top_level_json2_argument(self):
         response = Mock()

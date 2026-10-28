@@ -6,6 +6,7 @@ from app.transformers import transform_project_ticket
 
 
 router = APIRouter()
+legacy_router = APIRouter()
 
 PROJECT_TASK_FIELDS = [
     "id",
@@ -29,7 +30,7 @@ def root():
     }
 
 
-@router.get("/api/tickets")
+@legacy_router.get("/api/tickets")
 def get_tickets():
     tasks = odoo.search_read(
         model="project.task",
@@ -40,7 +41,7 @@ def get_tickets():
     return {"success": True, "count": len(tickets), "tickets": tickets}
 
 
-@router.get("/api/tickets/{ticket_id}")
+@legacy_router.get("/api/tickets/{ticket_id}")
 def get_ticket_detail(ticket_id: int):
     if ticket_id <= 0:
         raise HTTPException(

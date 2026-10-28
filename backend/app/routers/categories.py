@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.constants import CATEGORY_FIELDS
+from app.routers import auth
 from app.schemas import OcaCategoryCreate, OcaCategoryUpdate
 from app.services import assignments, odoo
 from app.transformers import transform_categories
@@ -71,12 +72,14 @@ def get_oca_categories():
 
 @router.get("/all")
 def get_all_oca_categories():
+    auth.require_agent()
     categories = read_categories(include_inactive=True)
     return {"success": True, "count": len(categories), "categories": categories}
 
 
 @router.post("", status_code=201)
 def create_oca_category(data: OcaCategoryCreate):
+    auth.require_agent()
     name = data.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail="문의 유형명은 필수입니다.")
@@ -121,6 +124,7 @@ def get_oca_category_detail(category_id: int):
 
 @router.patch("/{category_id}")
 def update_oca_category(category_id: int, data: OcaCategoryUpdate):
+    auth.require_agent()
     existing = get_category_record(category_id)
     values = {}
 
@@ -197,6 +201,7 @@ def set_category_active(category_id, active):
 
 @router.patch("/{category_id}/archive")
 def archive_oca_category(category_id: int):
+    auth.require_agent()
     return {
         "success": True,
         "message": "문의 유형이 비활성화되었습니다.",
@@ -206,6 +211,7 @@ def archive_oca_category(category_id: int):
 
 @router.patch("/{category_id}/restore")
 def restore_oca_category(category_id: int):
+    auth.require_agent()
     return {
         "success": True,
         "message": "문의 유형이 활성화되었습니다.",

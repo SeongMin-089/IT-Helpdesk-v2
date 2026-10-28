@@ -3,6 +3,7 @@ from html import escape
 from fastapi import APIRouter, HTTPException, Query
 
 from app import config
+from app.routers import auth
 from app.schemas import OcaFaqCreate, OcaFaqUpdate
 from app.services import odoo
 from app.transformers import clean_description, oca_relation
@@ -24,6 +25,7 @@ FAQ_FIELDS = [
 
 
 def require_faq_writes():
+    auth.require_agent()
     if not config.ODOO_FAQ_WRITE_ENABLED:
         raise HTTPException(
             status_code=403,

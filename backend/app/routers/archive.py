@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query
 
 from app.constants import OCA_PRIORITY_PATTERN, OCA_TICKET_FIELDS
+from app.routers import auth
 from app.services import odoo
 from app.transformers import transform_oca_tickets
 
@@ -81,6 +82,9 @@ def get_oca_ticket_page(active, page=1, page_size=50, **filters):
         )
 
     domain = build_ticket_list_domain(active=active, **filters)
+    user = auth.get_current_user()
+    if user["role"] != "agent":
+        domain.append(["partner_id", "=", user["partner_id"]])
     context = {"active_test": False} if not active else None
     total = odoo.search_count("helpdesk.ticket", domain=domain, context=context)
     records = odoo.search_read(
@@ -145,7 +149,10 @@ def get_oca_ticket_including_archived(ticket_id):
         limit=1,
         context={"active_test": False},
     )
-    return records[0] if records else None
+    if not records:
+        return None
+    auth.ensure_ticket_owner(records[0])
+    return records[0]
 
 
 def set_oca_ticket_active(ticket_id, active):
@@ -158,6 +165,16 @@ def set_oca_ticket_active(ticket_id, active):
     existing = get_oca_ticket_including_archived(ticket_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+    user = auth.get_current_user()
+    if user["role"] != "agent":
+        auth.require_ticket_owner(existing)
+        from app.routers.tickets import get_ticket_workflow, get_workflow_position
+
+        if get_workflow_position(existing, get_ticket_workflow(existing)) not in {0, 1}:
+            raise HTTPException(
+                status_code=409,
+                detail="접수 또는 배정 단계의 본인 문의만 보관·복원할 수 있습니다.",
+            )
     if bool(existing.get("active")) == active:
         action = "복원" if active else "보관"
         raise HTTPException(
