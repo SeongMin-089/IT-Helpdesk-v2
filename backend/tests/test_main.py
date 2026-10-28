@@ -170,6 +170,24 @@ class MemoryOdoo:
         self.created_ticket_values = None
         self.messages = []
         self.mail_messages = {}
+        self.model_fields = {
+            1001: {
+                "id": 1001,
+                "name": "stage_id",
+                "field_description": "Stage",
+                "ttype": "many2one",
+                "model": "helpdesk.ticket",
+            },
+            1002: {
+                "id": 1002,
+                "name": "user_id",
+                "field_description": "Assigned user",
+                "ttype": "many2one",
+                "model": "helpdesk.ticket",
+            },
+        }
+        self.tracking_values = {}
+        self.deny_tracking_access = False
         self.attachments = {
             50: {
                 "id": 50,
@@ -214,7 +232,15 @@ class MemoryOdoo:
             for record in records[:limit]
         ]
 
-    def search_read(self, model, fields, domain=None, limit=50, context=None):
+    def search_read(
+        self,
+        model,
+        fields,
+        domain=None,
+        limit=50,
+        context=None,
+        order=None,
+    ):
         if model == "res.users":
             records = list(self.users.values())
             records = [record for record in records if self._matches(record, domain)]
@@ -248,6 +274,19 @@ class MemoryOdoo:
             return self._select_fields(records, fields, limit)
         if model == "mail.message":
             records = list(self.mail_messages.values())
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "mail.tracking.value":
+            if self.deny_tracking_access:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Odoo access denied for mail.tracking.value",
+                )
+            records = list(self.tracking_values.values())
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "ir.model.fields":
+            records = list(self.model_fields.values())
             records = [record for record in records if self._matches(record, domain)]
             return self._select_fields(records, fields, limit)
         if model == "ir.attachment":
@@ -403,6 +442,36 @@ class OcaTicketApiTests(unittest.TestCase):
 
     def tearDown(self):
         patch.stopall()
+
+    def add_tracking(
+        self,
+        message_id,
+        tracking_id,
+        field_id,
+        old_id,
+        old_name,
+        new_id,
+        new_name,
+        date="2026-10-27 05:00:00",
+    ):
+        self.odoo.mail_messages[message_id] = {
+            "id": message_id,
+            "date": date,
+            "author_id": [7, "Agent Kim"],
+            "model": "helpdesk.ticket",
+            "res_id": 1,
+            "message_type": "notification",
+        }
+        field = self.odoo.model_fields[field_id]
+        self.odoo.tracking_values[tracking_id] = {
+            "id": tracking_id,
+            "field_id": [field_id, field["field_description"]],
+            "mail_message_id": [message_id, f"Message {message_id}"],
+            "old_value_integer": old_id,
+            "old_value_char": old_name,
+            "new_value_integer": new_id,
+            "new_value_char": new_name,
+        }
 
     def test_archive_active_ticket(self):
         result = archive.archive_oca_ticket(1)
@@ -823,6 +892,110 @@ class OcaTicketApiTests(unittest.TestCase):
             "mail.mt_note",
         )
 
+    def test_ticket_history_returns_stage_change(self):
+        self.add_tracking(300, 400, 1001, 2, "Assigned", 3, "In progress")
+
+        result = tickets.get_oca_ticket_history(1, limit=50)
+
+        self.assertEqual(result["count"], 1)
+        change = result["history"][0]
+        self.assertEqual(change["change_type"], "status")
+        self.assertEqual(change["field"]["name"], "stage_id")
+        self.assertEqual(change["old_value"], {"id": 2, "name": "Assigned"})
+        self.assertEqual(
+            change["new_value"], {"id": 3, "name": "In progress"}
+        )
+        self.assertEqual(change["changed_by"], {"id": 7, "name": "Agent Kim"})
+
+    def test_ticket_history_represents_multiple_changes_from_one_message(self):
+        self.add_tracking(300, 400, 1001, 2, "Assigned", 3, "In progress")
+        self.add_tracking(300, 401, 1002, 0, "", 7, "Agent Kim")
+
+        result = tickets.get_oca_ticket_history(1, limit=50)
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(
+            {change["change_type"] for change in result["history"]},
+            {"status", "assignee"},
+        )
+        self.assertEqual(
+            {change["message_id"] for change in result["history"]},
+            {300},
+        )
+
+    def test_ticket_history_returns_empty_when_no_tracking_exists(self):
+        result = tickets.get_oca_ticket_history(1, limit=50)
+
+        self.assertEqual(result, {"success": True, "count": 0, "history": []})
+
+    def test_ticket_history_rejects_unknown_ticket(self):
+        with self.assertRaises(HTTPException) as caught:
+            tickets.get_oca_ticket_history(999, limit=50)
+
+        self.assertEqual(caught.exception.status_code, 404)
+
+    def test_ticket_history_supports_closed_and_archived_ticket(self):
+        self.add_tracking(300, 400, 1001, 4, "Resolved", 5, "Done")
+        self.odoo.tickets[1]["stage_id"] = [5, "Done"]
+        self.odoo.tickets[1]["closed"] = True
+
+        closed = tickets.get_oca_ticket_history(1, limit=50)
+        self.odoo.tickets[1]["active"] = False
+        archived = tickets.get_oca_ticket_history(1, limit=50)
+
+        self.assertEqual(closed["count"], 1)
+        self.assertEqual(archived["count"], 1)
+
+    def test_ticket_history_propagates_tracking_access_error(self):
+        self.add_tracking(300, 400, 1001, 2, "Assigned", 3, "In progress")
+        self.odoo.deny_tracking_access = True
+
+        with self.assertRaises(HTTPException) as caught:
+            tickets.get_oca_ticket_history(1, limit=50)
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertIn("mail.tracking.value", caught.exception.detail)
+
+    def test_ticket_history_is_latest_first_and_limited(self):
+        self.add_tracking(
+            300,
+            400,
+            1001,
+            1,
+            "New",
+            2,
+            "Assigned",
+            date="2026-10-27 03:00:00",
+        )
+        self.add_tracking(
+            301,
+            401,
+            1001,
+            2,
+            "Assigned",
+            3,
+            "In progress",
+            date="2026-10-27 04:00:00",
+        )
+        self.add_tracking(
+            302,
+            402,
+            1002,
+            0,
+            "",
+            7,
+            "Agent Kim",
+            date="2026-10-27 05:00:00",
+        )
+
+        result = tickets.get_oca_ticket_history(1, limit=2)
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(
+            [change["id"] for change in result["history"]],
+            [402, 401],
+        )
+
     def test_blank_comment_is_rejected(self):
         with self.assertRaises(ValidationError):
             OcaTicketCommentCreate(body="   ")
@@ -1123,6 +1296,41 @@ class OdooJson2Tests(unittest.TestCase):
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["context"], {"active_test": False})
         self.assertEqual(payload["domain"], [["active", "=", False]])
+
+    def test_search_read_sends_order_argument(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = []
+
+        with (
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response) as post,
+        ):
+            odoo.search_read(
+                "mail.message",
+                ["id"],
+                order="date desc, id desc",
+            )
+
+        self.assertEqual(
+            post.call_args.kwargs["json"]["order"],
+            "date desc, id desc",
+        )
+
+    def test_search_read_preserves_odoo_access_denied_status(self):
+        response = Mock()
+        response.status_code = 403
+        response.raise_for_status.side_effect = odoo.requests.exceptions.HTTPError()
+
+        with (
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response),
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                odoo.search_read("mail.tracking.value", ["id"])
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertIn("access denied", caught.exception.detail)
 
     def test_message_post_sends_internal_note_through_json2(self):
         response = Mock()

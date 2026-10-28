@@ -11,6 +11,7 @@ from app.constants import (
     MAX_ATTACHMENT_SIZE,
     OCA_TICKET_FIELDS,
 )
+from app.routers.archive import get_oca_ticket_including_archived
 from app.routers.categories import get_category_record
 from app.schemas import (
     OcaTicketCreate,
@@ -210,6 +211,32 @@ def transform_ticket_attachment(attachment):
         "size": attachment.get("file_size") or 0,
         "created_at": attachment.get("create_date"),
         "created_by": oca_relation(attachment.get("create_uid")),
+    }
+
+
+def tracking_relation_value(record, prefix):
+    record_id = record.get(f"{prefix}_value_integer") or None
+    name = record.get(f"{prefix}_value_char") or None
+    if record_id is None and name is None:
+        return None
+    return {"id": record_id, "name": name}
+
+
+def transform_ticket_tracking(tracking, message, field):
+    return {
+        "id": tracking["id"],
+        "message_id": relation_id(tracking.get("mail_message_id")),
+        "changed_at": message.get("date"),
+        "changed_by": oca_relation(message.get("author_id")),
+        "change_type": "status" if field["name"] == "stage_id" else "assignee",
+        "field": {
+            "id": field["id"],
+            "name": field["name"],
+            "label": field.get("field_description") or field["name"],
+            "type": field.get("ttype"),
+        },
+        "old_value": tracking_relation_value(tracking, "old"),
+        "new_value": tracking_relation_value(tracking, "new"),
     }
 
 
@@ -480,6 +507,84 @@ def get_oca_ticket_comments(ticket_id: int):
     )
     comments = [transform_ticket_message(message) for message in messages]
     return {"success": True, "count": len(comments), "comments": comments}
+
+
+@router.get("/{ticket_id}/history")
+def get_oca_ticket_history(
+    ticket_id: int,
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    if ticket_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="올바르지 않은 문의 번호입니다.",
+        )
+    if get_oca_ticket_including_archived(ticket_id) is None:
+        raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+
+    fields = odoo.search_read(
+        model="ir.model.fields",
+        fields=["id", "name", "field_description", "ttype"],
+        domain=[
+            ["model", "=", "helpdesk.ticket"],
+            ["name", "in", ["stage_id", "user_id"]],
+        ],
+        limit=2,
+    )
+    field_by_id = {field["id"]: field for field in fields}
+    if {field["name"] for field in fields} != {"stage_id", "user_id"}:
+        raise HTTPException(
+            status_code=502,
+            detail="Odoo에서 상태·담당자 필드 메타데이터를 확인할 수 없습니다.",
+        )
+
+    messages = odoo.search_read(
+        model="mail.message",
+        fields=["id", "date", "author_id"],
+        domain=[
+            ["model", "=", "helpdesk.ticket"],
+            ["res_id", "=", ticket_id],
+        ],
+        limit=100,
+        order="date desc, id desc",
+    )
+    if not messages:
+        return {"success": True, "count": 0, "history": []}
+
+    message_by_id = {message["id"]: message for message in messages}
+    tracking_values = odoo.search_read(
+        model="mail.tracking.value",
+        fields=[
+            "id",
+            "field_id",
+            "mail_message_id",
+            "old_value_integer",
+            "old_value_char",
+            "new_value_integer",
+            "new_value_char",
+        ],
+        domain=[
+            ["mail_message_id", "in", list(message_by_id)],
+            ["field_id", "in", list(field_by_id)],
+        ],
+        limit=200,
+        order="id desc",
+    )
+
+    history = []
+    for tracking in tracking_values:
+        field = field_by_id.get(relation_id(tracking.get("field_id")))
+        message = message_by_id.get(
+            relation_id(tracking.get("mail_message_id"))
+        )
+        if field is not None and message is not None:
+            history.append(transform_ticket_tracking(tracking, message, field))
+    history.sort(
+        key=lambda item: (item.get("changed_at") or "", item["id"]),
+        reverse=True,
+    )
+    history = history[:limit]
+    return {"success": True, "count": len(history), "history": history}
 
 
 @router.post("/{ticket_id}/comments", status_code=201)

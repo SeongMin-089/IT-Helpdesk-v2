@@ -20,7 +20,7 @@ def _ensure_api_key():
         )
 
 
-def search_read(model, fields, domain=None, limit=50, context=None):
+def search_read(model, fields, domain=None, limit=50, context=None, order=None):
     _ensure_api_key()
     payload = {
         "domain": domain if domain is not None else [],
@@ -29,6 +29,8 @@ def search_read(model, fields, domain=None, limit=50, context=None):
     }
     if context is not None:
         payload["context"] = context
+    if order is not None:
+        payload["order"] = order
 
     try:
         response = requests.post(
@@ -42,6 +44,11 @@ def search_read(model, fields, domain=None, limit=50, context=None):
     except requests.exceptions.Timeout:
         raise HTTPException(status_code=504, detail="Odoo request timed out")
     except requests.exceptions.HTTPError:
+        if response.status_code in (401, 403):
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Odoo access denied: HTTP {response.status_code}",
+            )
         raise HTTPException(
             status_code=502,
             detail=f"Odoo API error: HTTP {response.status_code}",
