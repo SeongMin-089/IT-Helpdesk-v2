@@ -14,10 +14,12 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 import main  # noqa: E402
 from app import config  # noqa: E402
-from app.routers import archive, categories, legacy, tickets  # noqa: E402
+from app.routers import archive, categories, faqs, legacy, tickets  # noqa: E402
 from app.schemas import (  # noqa: E402
     OcaCategoryCreate,
     OcaCategoryUpdate,
+    OcaFaqCreate,
+    OcaFaqUpdate,
     OcaTicketCommentCreate,
     OcaTicketCreate,
     OcaTicketReprocess,
@@ -143,6 +145,68 @@ class MemoryOdoo:
                 "show_in_portal": True,
             },
         }
+        self.document_pages = {
+            100: {
+                "id": 100,
+                "name": "Public FAQ",
+                "content": False,
+                "tag_ids": [],
+                "active": True,
+                "parent_id": False,
+                "type": "category",
+                "create_date": "2026-10-27 01:00:00",
+                "write_date": "2026-10-27 01:00:00",
+            },
+            101: {
+                "id": 101,
+                "name": "Draft FAQ",
+                "content": False,
+                "tag_ids": [],
+                "active": True,
+                "parent_id": False,
+                "type": "category",
+                "create_date": "2026-10-27 01:00:00",
+                "write_date": "2026-10-27 01:00:00",
+            },
+            110: {
+                "id": 110,
+                "name": "Network reset",
+                "content": "<p>Restart the router safely.</p>",
+                "tag_ids": [201],
+                "active": True,
+                "parent_id": [100, "Public FAQ"],
+                "type": "content",
+                "create_date": "2026-10-27 02:00:00",
+                "write_date": "2026-10-27 02:00:00",
+            },
+            111: {
+                "id": 111,
+                "name": "Private draft",
+                "content": "<p>Draft content</p>",
+                "tag_ids": [202],
+                "active": True,
+                "parent_id": [101, "Draft FAQ"],
+                "type": "content",
+                "create_date": "2026-10-27 02:00:00",
+                "write_date": "2026-10-27 02:00:00",
+            },
+            112: {
+                "id": 112,
+                "name": "Archived public FAQ",
+                "content": "<p>Old content</p>",
+                "tag_ids": [],
+                "active": False,
+                "parent_id": [100, "Public FAQ"],
+                "type": "content",
+                "create_date": "2026-10-27 02:00:00",
+                "write_date": "2026-10-27 02:00:00",
+            },
+        }
+        self.document_tags = {
+            201: {"id": 201, "name": "network", "active": True},
+            202: {"id": 202, "name": "hardware", "active": True},
+        }
+        self.document_histories = []
         self.parameters = {}
         self.users = {
             7: {
@@ -209,15 +273,28 @@ class MemoryOdoo:
     def _matches(record, domain):
         for field, operator, value in domain or []:
             current = record.get(field)
-            if operator == "=" and current != value:
+            relation_value = (
+                current[0]
+                if isinstance(current, list)
+                and len(current) == 2
+                and isinstance(current[1], str)
+                else current
+            )
+            if operator == "=" and relation_value != value:
                 return False
-            if operator == "!=" and current == value:
+            if operator == "!=" and relation_value == value:
                 return False
             if operator == "in":
-                if isinstance(current, list):
+                if relation_value is not current:
+                    if relation_value not in value:
+                        return False
+                elif isinstance(current, list):
                     if not any(item in value for item in current):
                         return False
                 elif current not in value:
+                    return False
+            if operator == "ilike":
+                if str(value).casefold() not in str(current or "").casefold():
                     return False
             if operator == "=like":
                 prefix = value[:-1] if value.endswith("%") else value
@@ -252,7 +329,13 @@ class MemoryOdoo:
                     "name": "group_helpdesk_user",
                     "model": "res.groups",
                     "res_id": 31,
-                }
+                },
+                {
+                    "module": "mail",
+                    "name": "mt_note",
+                    "model": "mail.message.subtype",
+                    "res_id": 2,
+                },
             ]
             records = [record for record in records if self._matches(record, domain)]
             return self._select_fields(records, fields, limit)
@@ -287,6 +370,18 @@ class MemoryOdoo:
             return self._select_fields(records, fields, limit)
         if model == "ir.model.fields":
             records = list(self.model_fields.values())
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "document.page":
+            records = list(self.document_pages.values())
+            if not (context or {}).get("active_test") is False:
+                records = [record for record in records if record["active"]]
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "document.page.tag":
+            records = list(self.document_tags.values())
+            if not (context or {}).get("active_test") is False:
+                records = [record for record in records if record["active"]]
             records = [record for record in records if self._matches(record, domain)]
             return self._select_fields(records, fields, limit)
         if model == "ir.attachment":
@@ -324,6 +419,25 @@ class MemoryOdoo:
                 ),
                 "show_in_portal": values.get("show_in_portal", True),
             }
+            return [record_id]
+        if model == "document.page":
+            record_id = max(self.document_pages) + 1
+            parent_id = values["parent_id"]
+            tag_ids = values.get("tag_ids", [[6, 0, []]])[0][2]
+            self.document_pages[record_id] = {
+                "id": record_id,
+                "name": values["name"],
+                "content": values["content"],
+                "tag_ids": copy.deepcopy(tag_ids),
+                "active": values.get("active", True),
+                "parent_id": [parent_id, self.document_pages[parent_id]["name"]],
+                "type": values.get("type", "content"),
+                "create_date": "2026-10-27 05:00:00",
+                "write_date": "2026-10-27 05:00:00",
+            }
+            self.document_histories.append(
+                {"page_id": record_id, "content": values["content"]}
+            )
             return [record_id]
         if model == "ir.config_parameter":
             record_id = 100 + len(self.parameters)
@@ -391,6 +505,23 @@ class MemoryOdoo:
             return True
         if model == "ir.config_parameter" and record_id in self.parameters:
             self.parameters[record_id].update(copy.deepcopy(values))
+            return True
+        if model == "document.page" and record_id in self.document_pages:
+            updated_values = copy.deepcopy(values)
+            if "parent_id" in updated_values:
+                parent_id = updated_values["parent_id"]
+                updated_values["parent_id"] = [
+                    parent_id,
+                    self.document_pages[parent_id]["name"],
+                ]
+            if "tag_ids" in updated_values:
+                updated_values["tag_ids"] = updated_values["tag_ids"][0][2]
+            if "content" in updated_values:
+                self.document_histories.append(
+                    {"page_id": record_id, "content": updated_values["content"]}
+                )
+            self.document_pages[record_id].update(updated_values)
+            self.document_pages[record_id]["write_date"] = "2026-10-27 06:00:00"
             return True
         raise AssertionError("Unexpected write")
 
@@ -1148,6 +1279,196 @@ class OcaTicketApiTests(unittest.TestCase):
         self.assertEqual(comments["count"], 1)
         self.assertEqual(attachments["count"], 1)
         self.assertEqual(download.body, b"error")
+
+
+class FaqApiTests(unittest.TestCase):
+    def setUp(self):
+        self.odoo = MemoryOdoo()
+        self.search_patch = patch.object(
+            odoo, "search_read", side_effect=self.odoo.search_read
+        )
+        self.write_patch = patch.object(odoo, "write", side_effect=self.odoo.write)
+        self.create_patch = patch.object(odoo, "create", side_effect=self.odoo.create)
+        self.public_patch = patch.object(
+            config, "ODOO_FAQ_PUBLIC_CATEGORY_ID", "100"
+        )
+        self.draft_patch = patch.object(
+            config, "ODOO_FAQ_DRAFT_CATEGORY_ID", "101"
+        )
+        self.enabled_patch = patch.object(config, "ODOO_FAQ_WRITE_ENABLED", True)
+        for active_patch in (
+            self.search_patch,
+            self.write_patch,
+            self.create_patch,
+            self.public_patch,
+            self.draft_patch,
+            self.enabled_patch,
+        ):
+            active_patch.start()
+
+    def tearDown(self):
+        patch.stopall()
+
+    def test_public_list_and_detail_exclude_drafts_and_archived_pages(self):
+        result = faqs.get_public_faqs(limit=50)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["faqs"][0]["id"], 110)
+        self.assertEqual(result["faqs"][0]["content"], "Restart the router safely.")
+        self.assertEqual(faqs.get_public_faq(110)["faq"]["visibility"], "public")
+        for faq_id in (111, 112):
+            with self.assertRaises(HTTPException) as caught:
+                faqs.get_public_faq(faq_id)
+            self.assertEqual(caught.exception.status_code, 404)
+
+    def test_suggestions_search_title_content_and_tag_and_limit_results(self):
+        self.odoo.document_pages[113] = {
+            **copy.deepcopy(self.odoo.document_pages[110]),
+            "id": 113,
+            "name": "Router guide",
+            "content": "<p>network recovery</p>",
+        }
+        self.odoo.document_pages[114] = {
+            **copy.deepcopy(self.odoo.document_pages[110]),
+            "id": 114,
+            "name": "VPN guide",
+            "content": "<p>network access</p>",
+        }
+        self.odoo.document_pages[115] = {
+            **copy.deepcopy(self.odoo.document_pages[110]),
+            "id": 115,
+            "name": "Network",
+            "content": "<p>exact title match</p>",
+        }
+
+        result = faqs.get_faq_suggestions(q="network")
+
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(len(result["faqs"]), 3)
+        self.assertEqual(result["faqs"][0]["id"], 115)
+
+    def test_admin_create_update_publish_archive_restore_and_unpublish(self):
+        created = faqs.create_faq(
+            OcaFaqCreate(name="Printer FAQ", content="Restart printer", tag_ids=[202])
+        )["faq"]
+        faq_id = created["id"]
+        self.assertEqual(created["visibility"], "draft")
+
+        updated = faqs.update_faq(
+            faq_id,
+            OcaFaqUpdate(content="Power cycle", tag_ids=[201]),
+        )["faq"]
+        self.assertEqual(updated["content"], "Power cycle")
+        self.assertEqual(updated["tags"][0]["name"], "network")
+        self.assertGreaterEqual(len(self.odoo.document_histories), 2)
+
+        self.assertEqual(faqs.publish_faq(faq_id)["faq"]["visibility"], "public")
+        self.assertFalse(faqs.archive_faq(faq_id)["faq"]["active"])
+        self.assertTrue(faqs.restore_faq(faq_id)["faq"]["active"])
+        self.assertEqual(
+            faqs.unpublish_faq(faq_id)["faq"]["visibility"],
+            "draft",
+        )
+        all_faqs = faqs.get_all_faqs()
+        self.assertEqual(all_faqs["count"], 4)
+
+    def test_content_is_escaped_before_storage(self):
+        result = faqs.create_faq(
+            OcaFaqCreate(
+                name="Safe FAQ",
+                content="<script>alert(1)</script>\nNext line",
+                tag_ids=[],
+            )
+        )
+
+        stored = self.odoo.document_pages[result["faq"]["id"]]["content"]
+        self.assertIn("&lt;script&gt;", stored)
+        self.assertNotIn("<script>", stored)
+        self.assertEqual(
+            result["faq"]["content"],
+            "<script>alert(1)</script>\nNext line",
+        )
+
+    def test_invalid_category_settings_and_tags_are_rejected(self):
+        with patch.object(config, "ODOO_FAQ_PUBLIC_CATEGORY_ID", None):
+            with self.assertRaises(HTTPException) as caught:
+                faqs.get_public_faqs(limit=50)
+            self.assertEqual(caught.exception.status_code, 500)
+
+        with patch.object(config, "ODOO_FAQ_DRAFT_CATEGORY_ID", "100"):
+            with self.assertRaises(HTTPException) as caught:
+                faqs.get_faq_categories()
+            self.assertEqual(caught.exception.status_code, 500)
+
+        with self.assertRaises(HTTPException) as caught:
+            faqs.create_faq(
+                OcaFaqCreate(name="Bad tag", content="Text", tag_ids=[999])
+            )
+        self.assertEqual(caught.exception.status_code, 422)
+
+    def test_write_api_is_disabled_by_default_switch(self):
+        with patch.object(config, "ODOO_FAQ_WRITE_ENABLED", False):
+            with self.assertRaises(HTTPException) as caught:
+                faqs.create_faq(
+                    OcaFaqCreate(name="Blocked", content="Text", tag_ids=[])
+                )
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(len(self.odoo.document_pages), 5)
+        self.assertIn("인증·인가", caught.exception.detail)
+
+    def test_resolved_ticket_creates_review_required_private_draft(self):
+        self.odoo.tickets[1]["stage_id"] = [4, "Resolved"]
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p><strong>해결 내용</strong><br>Restarted safely</p>",
+            subtype_xmlid="mail.mt_note",
+        )
+
+        result = tickets.create_faq_draft_from_ticket(1)
+
+        self.assertTrue(result["review_required"])
+        self.assertEqual(result["faq"]["name"], "Printer failure")
+        self.assertEqual(result["faq"]["content"], "Restarted safely")
+        self.assertEqual(result["faq"]["visibility"], "draft")
+        stored = self.odoo.document_pages[result["faq"]["id"]]
+        self.assertNotIn("source_ticket_id", stored)
+
+    def test_ticket_draft_rejects_wrong_status_and_unrelated_notes(self):
+        with self.assertRaises(HTTPException) as caught:
+            tickets.create_faq_draft_from_ticket(1)
+        self.assertEqual(caught.exception.status_code, 409)
+
+        self.odoo.tickets[1]["stage_id"] = [5, "Done"]
+        self.odoo.tickets[1]["closed"] = True
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p><strong>재처리 사유</strong><br>Try again</p>",
+            subtype_xmlid="mail.mt_note",
+        )
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p>해결 내용은 댓글로만 남김</p>",
+            subtype_xmlid="mail.mt_comment",
+        )
+
+        with self.assertRaises(HTTPException) as caught:
+            tickets.create_faq_draft_from_ticket(1)
+        self.assertEqual(caught.exception.status_code, 422)
+
+    def test_odoo_access_and_connection_errors_are_not_returned_as_empty(self):
+        for status_code in (403, 502):
+            with patch.object(
+                odoo,
+                "search_read",
+                side_effect=HTTPException(status_code=status_code, detail="Odoo error"),
+            ):
+                with self.assertRaises(HTTPException) as caught:
+                    faqs.get_public_faqs(limit=50)
+            self.assertEqual(caught.exception.status_code, status_code)
 
 
 class CategoryApiTests(unittest.TestCase):

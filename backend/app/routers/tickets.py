@@ -13,6 +13,7 @@ from app.constants import (
 )
 from app.routers.archive import get_oca_ticket_including_archived
 from app.routers.categories import get_category_record
+from app.routers.faqs import create_faq_draft, require_faq_writes
 from app.schemas import (
     OcaTicketCreate,
     OcaTicketCommentCreate,
@@ -707,3 +708,69 @@ def download_oca_ticket_attachment(ticket_id: int, attachment_id: int):
             )
         },
     )
+
+
+@router.post("/{ticket_id}/faq-drafts", status_code=201)
+def create_faq_draft_from_ticket(ticket_id: int):
+    require_faq_writes()
+    ticket = get_ticket_for_stage_change(ticket_id)
+    workflow = get_ticket_workflow(ticket)
+    if get_workflow_position(ticket, workflow) not in {
+        RESOLVED_STAGE,
+        DONE_STAGE,
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="해결 또는 종료된 문의만 FAQ 초안으로 만들 수 있습니다.",
+        )
+
+    subtype_records = odoo.search_read(
+        model="ir.model.data",
+        fields=["res_id"],
+        domain=[
+            ["module", "=", "mail"],
+            ["name", "=", "mt_note"],
+            ["model", "=", "mail.message.subtype"],
+        ],
+        limit=1,
+    )
+    if not subtype_records:
+        raise HTTPException(
+            status_code=502,
+            detail="Odoo 내부 메모 유형을 확인할 수 없습니다.",
+        )
+
+    messages = odoo.search_read(
+        model="mail.message",
+        fields=["id", "body", "subtype_id", "date"],
+        domain=[
+            ["model", "=", "helpdesk.ticket"],
+            ["res_id", "=", ticket_id],
+            ["message_type", "=", "comment"],
+            ["subtype_id", "=", subtype_records[0]["res_id"]],
+            ["body", "ilike", "해결 내용"],
+        ],
+        limit=20,
+        order="date desc, id desc",
+    )
+    resolution = None
+    for message in messages:
+        lines = clean_description(message.get("body")).splitlines()
+        if lines and lines[0].strip() == "해결 내용":
+            content = "\n".join(lines[1:]).strip()
+            if content:
+                resolution = content
+                break
+    if resolution is None:
+        raise HTTPException(
+            status_code=422,
+            detail="FAQ 초안에 사용할 해결 내용 내부 메모를 찾을 수 없습니다.",
+        )
+
+    faq = create_faq_draft(ticket.get("name") or "", resolution)
+    return {
+        "success": True,
+        "message": "문의 해결 내용을 비공개 FAQ 초안으로 생성했습니다.",
+        "review_required": True,
+        "faq": faq,
+    }

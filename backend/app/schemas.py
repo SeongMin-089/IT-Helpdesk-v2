@@ -87,3 +87,37 @@ class OcaTicketCommentCreate(BaseModel):
         if not value.strip():
             raise ValueError("댓글 내용은 필수입니다.")
         return value.strip()
+
+
+class OcaFaqCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=20000)
+    tag_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_create(self):
+        if not self.name.strip():
+            raise ValueError("FAQ 제목은 필수입니다.")
+        if not self.content.strip():
+            raise ValueError("FAQ 내용은 필수입니다.")
+        if any(tag_id <= 0 for tag_id in self.tag_ids):
+            raise ValueError("태그 번호는 양수여야 합니다.")
+        return self
+
+
+class OcaFaqUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    content: str | None = Field(default=None, max_length=20000)
+    tag_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if not self.model_fields_set:
+            raise ValueError("수정할 항목을 하나 이상 입력해야 합니다.")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("FAQ 제목은 비워둘 수 없습니다.")
+        if self.content is not None and not self.content.strip():
+            raise ValueError("FAQ 내용은 비워둘 수 없습니다.")
+        if self.tag_ids is not None and any(tag_id <= 0 for tag_id in self.tag_ids):
+            raise ValueError("태그 번호는 양수여야 합니다.")
+        return self
