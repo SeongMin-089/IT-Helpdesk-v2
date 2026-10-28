@@ -313,8 +313,6 @@ def get_public_faq(faq_id: int):
 @router.patch("/{faq_id}")
 def update_faq(faq_id: int, data: OcaFaqUpdate):
     require_faq_writes()
-    categories = get_faq_categories()
-    get_managed_faq(faq_id, categories)
     values = {}
     if data.name is not None:
         values["name"] = data.name.strip()
@@ -322,6 +320,13 @@ def update_faq(faq_id: int, data: OcaFaqUpdate):
         values["content"] = plain_text_to_html(data.content)
     if data.tag_ids is not None:
         values["tag_ids"] = [[6, 0, validate_tag_ids(data.tag_ids)]]
+    if not values:
+        raise HTTPException(
+            status_code=422,
+            detail="실제로 변경할 FAQ 항목을 하나 이상 입력해야 합니다.",
+        )
+    categories = get_faq_categories()
+    get_managed_faq(faq_id, categories)
     odoo.write("document.page", faq_id, values)
     return {
         "success": True,

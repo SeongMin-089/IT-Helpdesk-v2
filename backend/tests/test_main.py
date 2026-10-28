@@ -1372,6 +1372,17 @@ class FaqApiTests(unittest.TestCase):
         all_faqs = faqs.get_all_faqs()
         self.assertEqual(all_faqs["count"], 4)
 
+    def test_update_rejects_null_only_payload_without_odoo_write(self):
+        with patch.object(odoo, "write") as write_mock:
+            with self.assertRaises(HTTPException) as caught:
+                faqs.update_faq(
+                    110,
+                    OcaFaqUpdate(name=None),
+                )
+
+        self.assertEqual(caught.exception.status_code, 422)
+        write_mock.assert_not_called()
+
     def test_content_is_escaped_before_storage(self):
         result = faqs.create_faq(
             OcaFaqCreate(
