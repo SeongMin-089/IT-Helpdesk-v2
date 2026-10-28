@@ -18,6 +18,7 @@ from app.schemas import (  # noqa: E402
     OcaCategoryCreate,
     OcaCategoryUpdate,
     OcaTicketCreate,
+    OcaTicketStageUpdate,
     OcaTicketUpdate,
 )
 from app.services import odoo  # noqa: E402
@@ -37,11 +38,62 @@ class MemoryOdoo:
                 "category_id": [4, "Hardware"],
                 "partner_id": [9, "Requester Lee"],
                 "team_id": [3, "IT"],
+                "company_id": [1, "Main Company"],
                 "closed": False,
                 "active": True,
                 "create_date": "2026-10-27 01:00:00",
                 "write_date": "2026-10-27 01:00:00",
             }
+        }
+        self.stages = {
+            1: {
+                "id": 1,
+                "name": "New",
+                "active": True,
+                "team_ids": [],
+                "company_id": [1, "Main Company"],
+                "closed": False,
+            },
+            2: {
+                "id": 2,
+                "name": "In progress",
+                "active": True,
+                "team_ids": [3],
+                "company_id": [1, "Main Company"],
+                "closed": False,
+            },
+            3: {
+                "id": 3,
+                "name": "Done",
+                "active": True,
+                "team_ids": [3],
+                "company_id": [1, "Main Company"],
+                "closed": True,
+            },
+            4: {
+                "id": 4,
+                "name": "Inactive",
+                "active": False,
+                "team_ids": [],
+                "company_id": [1, "Main Company"],
+                "closed": False,
+            },
+            5: {
+                "id": 5,
+                "name": "Other team",
+                "active": True,
+                "team_ids": [99],
+                "company_id": [1, "Main Company"],
+                "closed": False,
+            },
+            6: {
+                "id": 6,
+                "name": "Other company",
+                "active": True,
+                "team_ids": [],
+                "company_id": [2, "Other Company"],
+                "closed": False,
+            },
         }
         self.categories = {
             10: {
@@ -142,6 +194,12 @@ class MemoryOdoo:
                 records = [record for record in records if record["active"]]
             records = [record for record in records if self._matches(record, domain)]
             return self._select_fields(records, fields, limit)
+        if model == "helpdesk.ticket.stage":
+            records = list(self.stages.values())
+            if not (context or {}).get("active_test") is False:
+                records = [record for record in records if record["active"]]
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
         if model == "project.task":
             return []
         if model != "helpdesk.ticket":
@@ -198,6 +256,7 @@ class MemoryOdoo:
                 ),
                 "partner_id": False,
                 "team_id": False,
+                "company_id": [1, "Main Company"],
                 "closed": False,
                 "active": True,
                 "create_date": "2026-10-27 02:00:00",
@@ -209,6 +268,10 @@ class MemoryOdoo:
     def write(self, model, record_id, values):
         if model == "helpdesk.ticket" and record_id in self.tickets:
             updated_values = copy.deepcopy(values)
+            if "stage_id" in updated_values:
+                stage = self.stages[updated_values["stage_id"]]
+                updated_values["stage_id"] = [stage["id"], stage["name"]]
+                updated_values["closed"] = stage["closed"]
             if "user_id" in updated_values:
                 user_id = updated_values["user_id"]
                 updated_values["user_id"] = (
@@ -235,7 +298,7 @@ class OcaTicketApiTests(unittest.TestCase):
         )
         self.write_patch = patch.object(odoo, "write", side_effect=self.odoo.write)
         self.search_patch.start()
-        self.write_patch.start()
+        self.write_mock = self.write_patch.start()
 
     def tearDown(self):
         patch.stopall()
@@ -400,6 +463,85 @@ class OcaTicketApiTests(unittest.TestCase):
             paths.index("/api/oca/tickets/archived"),
             paths.index("/api/oca/tickets/{ticket_id}"),
         )
+
+    def test_stage_change_updates_ticket_and_preserves_response_shape(self):
+        result = tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=3))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["ticket"]["status"], {"id": 3, "name": "Done"})
+        self.assertTrue(result["ticket"]["closed"])
+        for field in ("assignee", "category", "priority", "auto_assigned"):
+            self.assertIn(field, result["ticket"])
+        self.write_mock.assert_called_once_with(
+            "helpdesk.ticket", 1, {"stage_id": 3}
+        )
+
+    def test_stage_change_unknown_ticket_returns_404(self):
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket_stage(999, OcaTicketStageUpdate(stage_id=3))
+
+        self.assertEqual(caught.exception.status_code, 404)
+
+    def test_stage_change_non_positive_ticket_id_returns_400(self):
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket_stage(0, OcaTicketStageUpdate(stage_id=3))
+
+        self.assertEqual(caught.exception.status_code, 400)
+
+    def test_invalid_stage_id_is_rejected(self):
+        for stage_id in (0, -1):
+            with self.subTest(stage_id=stage_id):
+                with self.assertRaises(ValidationError):
+                    OcaTicketStageUpdate(stage_id=stage_id)
+
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=999))
+        self.assertEqual(caught.exception.status_code, 422)
+
+    def test_inactive_stage_returns_422(self):
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=4))
+
+        self.assertEqual(caught.exception.status_code, 422)
+
+    def test_archived_ticket_stage_change_returns_409(self):
+        archive.archive_oca_ticket(1)
+        self.write_mock.reset_mock()
+
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=3))
+
+        self.assertEqual(caught.exception.status_code, 409)
+        self.write_mock.assert_not_called()
+
+    def test_same_stage_does_not_write(self):
+        result = tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=2))
+
+        self.assertEqual(result["ticket"]["status"]["id"], 2)
+        self.write_mock.assert_not_called()
+
+    def test_stage_unavailable_to_ticket_team_returns_422(self):
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=5))
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.write_mock.assert_not_called()
+
+    def test_stage_unavailable_to_ticket_company_returns_422(self):
+        with self.assertRaises(HTTPException) as caught:
+            tickets.update_oca_ticket_stage(1, OcaTicketStageUpdate(stage_id=6))
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.write_mock.assert_not_called()
+
+    def test_stage_change_mismatch_returns_502(self):
+        with patch.object(odoo, "write", return_value=True):
+            with self.assertRaises(HTTPException) as caught:
+                tickets.update_oca_ticket_stage(
+                    1, OcaTicketStageUpdate(stage_id=3)
+                )
+
+        self.assertEqual(caught.exception.status_code, 502)
 
 
 class CategoryApiTests(unittest.TestCase):

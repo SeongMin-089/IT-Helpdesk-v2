@@ -47,3 +47,7 @@ class OcaTicketUpdate(BaseModel):
         if self.description is not None and not self.description.strip():
             raise ValueError("내용은 비워둘 수 없습니다.")
         return self
+
+
+class OcaTicketStageUpdate(BaseModel):
+    stage_id: int = Field(gt=0)

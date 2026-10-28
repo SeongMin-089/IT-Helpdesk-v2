@@ -9,6 +9,7 @@ OCA_TICKET_FIELDS = [
     "category_id",
     "partner_id",
     "team_id",
+    "company_id",
     "closed",
     "active",
     "create_date",
