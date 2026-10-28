@@ -106,7 +106,12 @@ def write(model, record_id, values):
         raise HTTPException(status_code=502, detail="Cannot connect to Odoo")
 
 
-def message_post(model, record_id, body):
+def message_post(
+    model,
+    record_id,
+    body,
+    subtype_xmlid="mail.mt_note",
+):
     _ensure_api_key()
     try:
         response = requests.post(
@@ -117,7 +122,7 @@ def message_post(model, record_id, body):
                 "body": body,
                 "body_is_html": True,
                 "message_type": "comment",
-                "subtype_xmlid": "mail.mt_note",
+                "subtype_xmlid": subtype_xmlid,
             },
             timeout=15,
         )

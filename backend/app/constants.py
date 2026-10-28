@@ -41,3 +41,21 @@ HELPDESK_GROUP_XML_IDS = [
     "group_helpdesk_user",
     "group_helpdesk_manager",
 ]
+
+MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
+ALLOWED_ATTACHMENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".zip": "application/zip",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pptx": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    ),
+}

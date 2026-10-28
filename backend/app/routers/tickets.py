@@ -1,18 +1,27 @@
+import base64
+import binascii
 from html import escape
+from pathlib import PurePath
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Query, Response
 
-from app.constants import OCA_TICKET_FIELDS
+from app.constants import (
+    ALLOWED_ATTACHMENT_TYPES,
+    MAX_ATTACHMENT_SIZE,
+    OCA_TICKET_FIELDS,
+)
 from app.routers.categories import get_category_record
 from app.schemas import (
     OcaTicketCreate,
+    OcaTicketCommentCreate,
     OcaTicketReprocess,
     OcaTicketResolve,
     OcaTicketStageUpdate,
     OcaTicketUpdate,
 )
 from app.services import assignments, odoo
-from app.transformers import transform_oca_tickets
+from app.transformers import clean_description, oca_relation, transform_oca_tickets
 
 
 router = APIRouter(prefix="/api/oca/tickets")
@@ -171,6 +180,48 @@ def post_workflow_note(ticket_id, label, content):
         ticket_id,
         f"<p><strong>{label}</strong><br>{safe_content}</p>",
     )
+
+
+def transform_ticket_message(message):
+    return {
+        "id": message["id"],
+        "body": clean_description(message.get("body")),
+        "author": oca_relation(message.get("author_id")),
+        "created_at": message.get("date"),
+        "kind": "note" if message.get("is_internal") else "comment",
+        "message_type": message.get("message_type"),
+        "subtype": oca_relation(message.get("subtype_id")),
+    }
+
+
+def transform_ticket_attachment(attachment):
+    return {
+        "id": attachment["id"],
+        "name": attachment.get("name") or "",
+        "content_type": attachment.get("mimetype") or "application/octet-stream",
+        "size": attachment.get("file_size") or 0,
+        "created_at": attachment.get("create_date"),
+        "created_by": oca_relation(attachment.get("create_uid")),
+    }
+
+
+def validate_attachment(filename, content_type, file_data):
+    if not file_data:
+        raise HTTPException(status_code=422, detail="빈 파일은 업로드할 수 없습니다.")
+    if len(file_data) > MAX_ATTACHMENT_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail="첨부 파일은 10MB를 초과할 수 없습니다.",
+        )
+    if any(character in filename for character in ("/", "\\", "\r", "\n", "\0")):
+        raise HTTPException(status_code=422, detail="올바르지 않은 파일명입니다.")
+
+    expected_type = ALLOWED_ATTACHMENT_TYPES.get(PurePath(filename).suffix.lower())
+    if expected_type is None or content_type != expected_type:
+        raise HTTPException(
+            status_code=422,
+            detail="허용되지 않거나 파일 확장자와 일치하지 않는 형식입니다.",
+        )
 
 
 @router.get("")
@@ -395,4 +446,149 @@ def reprocess_oca_ticket(ticket_id: int, data: OcaTicketReprocess):
         ticket_id,
         workflow[IN_PROGRESS_STAGE]["id"],
         "문의가 재처리 단계로 변경되었습니다.",
+    )
+
+
+@router.get("/{ticket_id}/comments")
+def get_oca_ticket_comments(ticket_id: int):
+    get_ticket_for_stage_change(ticket_id)
+    messages = odoo.search_read(
+        model="mail.message",
+        fields=[
+            "id",
+            "body",
+            "author_id",
+            "date",
+            "message_type",
+            "subtype_id",
+            "is_internal",
+        ],
+        domain=[
+            ["model", "=", "helpdesk.ticket"],
+            ["res_id", "=", ticket_id],
+            ["message_type", "=", "comment"],
+        ],
+        limit=100,
+    )
+    comments = [transform_ticket_message(message) for message in messages]
+    return {"success": True, "count": len(comments), "comments": comments}
+
+
+@router.post("/{ticket_id}/comments", status_code=201)
+def create_oca_ticket_comment(ticket_id: int, data: OcaTicketCommentCreate):
+    get_ticket_for_stage_change(ticket_id)
+    safe_body = escape(data.body).replace("\n", "<br>")
+    subtype_xmlid = "mail.mt_note" if data.kind == "note" else "mail.mt_comment"
+    message_id = odoo.message_post(
+        "helpdesk.ticket",
+        ticket_id,
+        f"<p>{safe_body}</p>",
+        subtype_xmlid=subtype_xmlid,
+    )
+    return {
+        "success": True,
+        "message": "댓글이 등록되었습니다.",
+        "comment_id": message_id,
+        "kind": data.kind,
+    }
+
+
+@router.get("/{ticket_id}/attachments")
+def get_oca_ticket_attachments(ticket_id: int):
+    get_ticket_for_stage_change(ticket_id)
+    records = odoo.search_read(
+        model="ir.attachment",
+        fields=[
+            "id",
+            "name",
+            "mimetype",
+            "file_size",
+            "create_date",
+            "create_uid",
+        ],
+        domain=[
+            ["res_model", "=", "helpdesk.ticket"],
+            ["res_id", "=", ticket_id],
+            ["type", "=", "binary"],
+        ],
+        limit=100,
+    )
+    attachments = [transform_ticket_attachment(record) for record in records]
+    return {
+        "success": True,
+        "count": len(attachments),
+        "attachments": attachments,
+    }
+
+
+@router.post("/{ticket_id}/attachments", status_code=201)
+def upload_oca_ticket_attachment(
+    ticket_id: int,
+    filename: str = Query(min_length=1, max_length=255),
+    content_type: str = Query(min_length=1, max_length=200),
+    file_data: bytes = Body(media_type="application/octet-stream"),
+):
+    get_ticket_for_stage_change(ticket_id)
+    validate_attachment(filename, content_type, file_data)
+    result = odoo.create(
+        "ir.attachment",
+        {
+            "name": filename,
+            "datas": base64.b64encode(file_data).decode("ascii"),
+            "mimetype": content_type,
+            "res_model": "helpdesk.ticket",
+            "res_id": ticket_id,
+            "type": "binary",
+        },
+    )
+    return {
+        "success": True,
+        "message": "첨부 파일이 등록되었습니다.",
+        "attachment": {
+            "id": result[0],
+            "name": filename,
+            "content_type": content_type,
+            "size": len(file_data),
+        },
+    }
+
+
+@router.get("/{ticket_id}/attachments/{attachment_id}/download")
+def download_oca_ticket_attachment(ticket_id: int, attachment_id: int):
+    get_ticket_for_stage_change(ticket_id)
+    if attachment_id <= 0:
+        raise HTTPException(status_code=400, detail="올바르지 않은 첨부 번호입니다.")
+
+    records = odoo.search_read(
+        model="ir.attachment",
+        fields=["id", "name", "mimetype", "datas"],
+        domain=[
+            ["id", "=", attachment_id],
+            ["res_model", "=", "helpdesk.ticket"],
+            ["res_id", "=", ticket_id],
+            ["type", "=", "binary"],
+        ],
+        limit=1,
+    )
+    if not records:
+        raise HTTPException(status_code=404, detail="첨부 파일을 찾을 수 없습니다.")
+
+    attachment = records[0]
+    try:
+        content = base64.b64decode(attachment.get("datas") or "", validate=True)
+    except (binascii.Error, TypeError, ValueError):
+        raise HTTPException(
+            status_code=502,
+            detail="Odoo 첨부 파일 데이터를 읽을 수 없습니다.",
+        )
+
+    filename = attachment.get("name") or f"attachment-{attachment_id}"
+    return Response(
+        content=content,
+        media_type=attachment.get("mimetype") or "application/octet-stream",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
+            )
+        },
     )

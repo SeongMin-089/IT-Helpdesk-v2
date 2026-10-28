@@ -1,3 +1,4 @@
+import base64
 import copy
 import sys
 import unittest
@@ -17,6 +18,7 @@ from app.routers import archive, categories, legacy, tickets  # noqa: E402
 from app.schemas import (  # noqa: E402
     OcaCategoryCreate,
     OcaCategoryUpdate,
+    OcaTicketCommentCreate,
     OcaTicketCreate,
     OcaTicketReprocess,
     OcaTicketResolve,
@@ -167,6 +169,22 @@ class MemoryOdoo:
         }
         self.created_ticket_values = None
         self.messages = []
+        self.mail_messages = {}
+        self.attachments = {
+            50: {
+                "id": 50,
+                "name": "error.txt",
+                "mimetype": "text/plain",
+                "file_size": 5,
+                "create_date": "2026-10-27 03:00:00",
+                "create_uid": [7, "Agent Kim"],
+                "res_model": "helpdesk.ticket",
+                "res_id": 1,
+                "type": "binary",
+                "datas": "ZXJyb3I=",
+            }
+        }
+        self.created_attachment_values = None
         self.events = []
 
     @staticmethod
@@ -226,6 +244,14 @@ class MemoryOdoo:
             records = list(self.stages.values())
             if not (context or {}).get("active_test") is False:
                 records = [record for record in records if record["active"]]
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "mail.message":
+            records = list(self.mail_messages.values())
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit)
+        if model == "ir.attachment":
+            records = list(self.attachments.values())
             records = [record for record in records if self._matches(record, domain)]
             return self._select_fields(records, fields, limit)
         if model == "project.task":
@@ -291,6 +317,17 @@ class MemoryOdoo:
                 "write_date": "2026-10-27 02:00:00",
             }
             return [record_id]
+        if model == "ir.attachment":
+            self.created_attachment_values = copy.deepcopy(values)
+            record_id = max(self.attachments) + 1
+            self.attachments[record_id] = {
+                "id": record_id,
+                "file_size": len(base64.b64decode(values["datas"])),
+                "create_date": "2026-10-27 04:00:00",
+                "create_uid": [7, "Agent Kim"],
+                **copy.deepcopy(values),
+            }
+            return [record_id]
         raise AssertionError(f"Unexpected create model: {model}")
 
     def write(self, model, record_id, values):
@@ -318,12 +355,34 @@ class MemoryOdoo:
             return True
         raise AssertionError("Unexpected write")
 
-    def message_post(self, model, record_id, body):
+    def message_post(
+        self,
+        model,
+        record_id,
+        body,
+        subtype_xmlid="mail.mt_note",
+    ):
         if model != "helpdesk.ticket" or record_id not in self.tickets:
             raise AssertionError("Unexpected message_post")
         self.messages.append(body)
+        message_id = 200 + len(self.messages)
+        is_internal = subtype_xmlid == "mail.mt_note"
+        self.mail_messages[message_id] = {
+            "id": message_id,
+            "body": body,
+            "author_id": [7, "Agent Kim"],
+            "date": "2026-10-27 04:00:00",
+            "message_type": "comment",
+            "subtype_id": [
+                2 if is_internal else 1,
+                "Note" if is_internal else "Comment",
+            ],
+            "is_internal": is_internal,
+            "model": "helpdesk.ticket",
+            "res_id": record_id,
+        }
         self.events.append(("message_post", record_id))
-        return len(self.messages)
+        return message_id
 
 
 class OcaTicketApiTests(unittest.TestCase):
@@ -336,9 +395,11 @@ class OcaTicketApiTests(unittest.TestCase):
         self.message_patch = patch.object(
             odoo, "message_post", side_effect=self.odoo.message_post
         )
+        self.create_patch = patch.object(odoo, "create", side_effect=self.odoo.create)
         self.search_patch.start()
         self.write_mock = self.write_patch.start()
         self.message_mock = self.message_patch.start()
+        self.create_mock = self.create_patch.start()
 
     def tearDown(self):
         patch.stopall()
@@ -731,6 +792,144 @@ class OcaTicketApiTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 502)
         self.write_mock.assert_not_called()
 
+    def test_create_and_list_ticket_comments_and_internal_notes(self):
+        comment = tickets.create_oca_ticket_comment(
+            1,
+            OcaTicketCommentCreate(body="Hello <team>", kind="comment"),
+        )
+        note = tickets.create_oca_ticket_comment(
+            1,
+            OcaTicketCommentCreate(body="Internal only", kind="note"),
+        )
+
+        result = tickets.get_oca_ticket_comments(1)
+
+        self.assertEqual(comment["kind"], "comment")
+        self.assertEqual(note["kind"], "note")
+        self.assertIn("&lt;team&gt;", self.odoo.messages[0])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(
+            {item["kind"] for item in result["comments"]},
+            {"comment", "note"},
+        )
+        self.assertEqual(result["comments"][0]["author"]["id"], 7)
+        self.assertEqual(result["comments"][0]["message_type"], "comment")
+        self.assertEqual(
+            self.message_mock.call_args_list[0].kwargs["subtype_xmlid"],
+            "mail.mt_comment",
+        )
+        self.assertEqual(
+            self.message_mock.call_args_list[1].kwargs["subtype_xmlid"],
+            "mail.mt_note",
+        )
+
+    def test_blank_comment_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            OcaTicketCommentCreate(body="   ")
+
+    def test_attachment_list_returns_only_ticket_files(self):
+        self.odoo.attachments[51] = {
+            **copy.deepcopy(self.odoo.attachments[50]),
+            "id": 51,
+            "name": "other.txt",
+            "res_id": 999,
+        }
+
+        result = tickets.get_oca_ticket_attachments(1)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["attachments"][0]["id"], 50)
+        self.assertEqual(result["attachments"][0]["content_type"], "text/plain")
+
+    def test_attachment_upload_validates_and_creates_odoo_record(self):
+        result = tickets.upload_oca_ticket_attachment(
+            1,
+            filename="evidence.txt",
+            content_type="text/plain",
+            file_data=b"hello",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["attachment"]["size"], 5)
+        values = self.odoo.created_attachment_values
+        self.assertEqual(values["res_model"], "helpdesk.ticket")
+        self.assertEqual(values["res_id"], 1)
+        self.assertEqual(base64.b64decode(values["datas"]), b"hello")
+
+    def test_attachment_upload_rejects_invalid_file(self):
+        cases = (
+            ("empty.txt", "text/plain", b""),
+            ("script.exe", "application/octet-stream", b"binary"),
+            ("fake.png", "text/plain", b"not an image"),
+            ("../escape.txt", "text/plain", b"text"),
+        )
+
+        for filename, content_type, file_data in cases:
+            with self.subTest(filename=filename):
+                with self.assertRaises(HTTPException):
+                    tickets.upload_oca_ticket_attachment(
+                        1,
+                        filename=filename,
+                        content_type=content_type,
+                        file_data=file_data,
+                    )
+        self.create_mock.assert_not_called()
+
+    def test_attachment_upload_rejects_oversized_file(self):
+        with patch.object(tickets, "MAX_ATTACHMENT_SIZE", 3):
+            with self.assertRaises(HTTPException) as caught:
+                tickets.upload_oca_ticket_attachment(
+                    1,
+                    filename="large.txt",
+                    content_type="text/plain",
+                    file_data=b"four",
+                )
+
+        self.assertEqual(caught.exception.status_code, 413)
+        self.create_mock.assert_not_called()
+
+    def test_attachment_download_checks_link_and_returns_file(self):
+        response = tickets.download_oca_ticket_attachment(1, 50)
+
+        self.assertEqual(response.body, b"error")
+        self.assertEqual(response.media_type, "text/plain")
+        self.assertIn("error.txt", response.headers["content-disposition"])
+
+        self.odoo.attachments[50]["res_id"] = 999
+        with self.assertRaises(HTTPException) as caught:
+            tickets.download_oca_ticket_attachment(1, 50)
+        self.assertEqual(caught.exception.status_code, 404)
+
+    def test_attachment_download_rejects_corrupt_odoo_data(self):
+        self.odoo.attachments[50]["datas"] = "not-base64!"
+
+        with self.assertRaises(HTTPException) as caught:
+            tickets.download_oca_ticket_attachment(1, 50)
+
+        self.assertEqual(caught.exception.status_code, 502)
+
+    def test_comments_and_attachments_require_active_ticket(self):
+        archive.archive_oca_ticket(1)
+
+        operations = (
+            lambda: tickets.get_oca_ticket_comments(1),
+            lambda: tickets.get_oca_ticket_attachments(1),
+            lambda: tickets.create_oca_ticket_comment(
+                1, OcaTicketCommentCreate(body="Comment")
+            ),
+            lambda: tickets.upload_oca_ticket_attachment(
+                1,
+                filename="file.txt",
+                content_type="text/plain",
+                file_data=b"data",
+            ),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaises(HTTPException) as caught:
+                    operation()
+                self.assertEqual(caught.exception.status_code, 409)
+
 
 class CategoryApiTests(unittest.TestCase):
     def setUp(self):
@@ -903,6 +1102,27 @@ class OdooJson2Tests(unittest.TestCase):
                 "message_type": "comment",
                 "subtype_xmlid": "mail.mt_note",
             },
+        )
+
+    def test_message_post_accepts_comment_subtype(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = [92]
+
+        with (
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response) as post,
+        ):
+            odoo.message_post(
+                "helpdesk.ticket",
+                7,
+                "<p>Comment</p>",
+                subtype_xmlid="mail.mt_comment",
+            )
+
+        self.assertEqual(
+            post.call_args.kwargs["json"]["subtype_xmlid"],
+            "mail.mt_comment",
         )
 
 

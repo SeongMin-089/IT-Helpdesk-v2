@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.constants import OCA_PRIORITY_PATTERN
@@ -72,4 +74,16 @@ class OcaTicketReprocess(BaseModel):
     def validate_reason(cls, value):
         if not value.strip():
             raise ValueError("재처리 사유는 필수입니다.")
+        return value.strip()
+
+
+class OcaTicketCommentCreate(BaseModel):
+    body: str = Field(min_length=1, max_length=10000)
+    kind: Literal["comment", "note"] = "comment"
+
+    @field_validator("body")
+    @classmethod
+    def validate_body(cls, value):
+        if not value.strip():
+            raise ValueError("댓글 내용은 필수입니다.")
         return value.strip()
