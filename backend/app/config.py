@@ -17,3 +17,22 @@ ODOO_FAQ_DRAFT_CATEGORY_ID = os.getenv("ODOO_FAQ_DRAFT_CATEGORY_ID")
 ODOO_FAQ_WRITE_ENABLED = os.getenv(
     "ODOO_FAQ_WRITE_ENABLED", "false"
 ).lower() in {"1", "true", "yes"}
+
+AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "it_helpdesk_session")
+AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+AUTH_COOKIE_SAMESITE = os.getenv("AUTH_COOKIE_SAMESITE", "strict").lower()
+if AUTH_COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+    AUTH_COOKIE_SAMESITE = "strict"
+AUTH_SESSION_MAX_AGE = int(os.getenv("AUTH_SESSION_MAX_AGE", "3600"))
+AUTH_ALLOWED_ORIGINS = frozenset(
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "AUTH_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://localhost:5173,http://localhost:8000",
+    ).split(",")
+    if origin.strip()
+)

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.routers import archive, assignees, categories, faqs, legacy, reference, tickets
+from app.routers import auth, archive, assignees, categories, faqs, legacy, reference, tickets
 
 
 app = FastAPI(
@@ -9,6 +9,7 @@ app = FastAPI(
 )
 
 app.include_router(legacy.router)
+app.include_router(auth.router)
 app.include_router(archive.router)
 app.include_router(tickets.router)
 app.include_router(faqs.router)

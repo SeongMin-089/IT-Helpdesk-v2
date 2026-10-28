@@ -20,6 +20,96 @@ def _ensure_api_key():
         )
 
 
+def _session_jsonrpc(path, params, session_id=None, authentication=False):
+    cookies = {"session_id": session_id} if session_id else None
+    try:
+        response = requests.post(
+            f"{config.ODOO_URL}{path}",
+            headers={"Content-Type": "application/json"},
+            cookies=cookies,
+            json={"jsonrpc": "2.0", "method": "call", "params": params},
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Odoo request timed out")
+    except requests.exceptions.HTTPError:
+        if response.status_code in (401, 403):
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Odoo session access denied",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Odoo API error: HTTP {response.status_code}",
+        )
+    except (requests.exceptions.RequestException, ValueError):
+        raise HTTPException(status_code=502, detail="Cannot connect to Odoo")
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="Invalid Odoo session response")
+    error = payload.get("error")
+    if error:
+        error_data = error.get("data") if isinstance(error, dict) else {}
+        error_name = str((error_data or {}).get("name") or "")
+        if authentication or "SessionExpired" in error_name or "AccessDenied" in error_name:
+            raise HTTPException(status_code=401, detail="Odoo authentication failed")
+        if "AccessError" in error_name:
+            raise HTTPException(status_code=403, detail="Odoo session access denied")
+        raise HTTPException(status_code=502, detail="Odoo session request failed")
+    if "result" not in payload:
+        raise HTTPException(status_code=502, detail="Invalid Odoo session response")
+    return payload["result"], response
+
+
+def authenticate_session(login, password):
+    result, response = _session_jsonrpc(
+        "/web/session/authenticate",
+        {"db": config.ODOO_DB, "login": login, "password": password},
+        authentication=True,
+    )
+    session_id = response.cookies.get("session_id")
+    if not isinstance(result, dict) or not result.get("uid") or not session_id:
+        raise HTTPException(status_code=401, detail="Odoo authentication failed")
+    return session_id, result
+
+
+def get_session_info(session_id):
+    result, _response = _session_jsonrpc(
+        "/web/session/get_session_info",
+        {},
+        session_id=session_id,
+        authentication=True,
+    )
+    if not isinstance(result, dict) or not result.get("uid"):
+        raise HTTPException(status_code=401, detail="Odoo session expired")
+    return result
+
+
+def session_call_kw(session_id, model, method, args=None, kwargs=None):
+    result, _response = _session_jsonrpc(
+        f"/web/dataset/call_kw/{model}/{method}",
+        {
+            "model": model,
+            "method": method,
+            "args": args or [],
+            "kwargs": kwargs or {},
+        },
+        session_id=session_id,
+    )
+    return result
+
+
+def destroy_session(session_id):
+    _session_jsonrpc(
+        "/web/session/destroy",
+        {},
+        session_id=session_id,
+        authentication=True,
+    )
+
+
 def search_read(
     model,
     fields,

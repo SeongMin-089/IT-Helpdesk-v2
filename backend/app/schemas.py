@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 from app.constants import OCA_PRIORITY_PATTERN
 
@@ -121,3 +121,16 @@ class OcaFaqUpdate(BaseModel):
         if self.tag_ids is not None and any(tag_id <= 0 for tag_id in self.tag_ids):
             raise ValueError("태그 번호는 양수여야 합니다.")
         return self
+
+
+class AuthLogin(BaseModel):
+    login: str = Field(min_length=1, max_length=254)
+    password: SecretStr = Field(min_length=1, max_length=1024)
+
+    @field_validator("login")
+    @classmethod
+    def validate_login(cls, value):
+        login = value.strip()
+        if not login:
+            raise ValueError("로그인 ID는 필수입니다.")
+        return login

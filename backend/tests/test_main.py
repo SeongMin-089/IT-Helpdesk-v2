@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from pydantic import ValidationError
+from starlette.requests import Request
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -14,7 +15,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 import main  # noqa: E402
 from app import config  # noqa: E402
-from app.routers import archive, categories, faqs, legacy, reference, tickets  # noqa: E402
+from app.routers import auth, archive, categories, faqs, legacy, reference, tickets  # noqa: E402
 from app.schemas import (  # noqa: E402
     OcaCategoryCreate,
     OcaCategoryUpdate,
@@ -26,8 +27,36 @@ from app.schemas import (  # noqa: E402
     OcaTicketResolve,
     OcaTicketStageUpdate,
     OcaTicketUpdate,
+    AuthLogin,
 )
 from app.services import odoo  # noqa: E402
+
+
+def make_auth_request(method, session_id=None, origin="http://localhost:5173"):
+    headers = []
+    if origin is not None:
+        headers.append((b"origin", origin.encode()))
+    if session_id is not None:
+        headers.append(
+            (
+                b"cookie",
+                f"{config.AUTH_COOKIE_NAME}={session_id}".encode(),
+            )
+        )
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": method,
+            "scheme": "https",
+            "path": "/api/auth",
+            "raw_path": b"/api/auth",
+            "query_string": b"",
+            "headers": headers,
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 443),
+        }
+    )
 
 
 class MemoryOdoo:
@@ -601,6 +630,170 @@ class MemoryOdoo:
         }
         self.events.append(("message_post", record_id))
         return message_id
+
+
+class AuthApiTests(unittest.TestCase):
+    SESSION_ID = "A" * 84
+    OLD_SESSION_ID = "B" * 84
+
+    def setUp(self):
+        self.groups = {"base.group_user"}
+        self.user_record = {
+            "id": 7,
+            "name": "Employee Kim",
+            "partner_id": [9, "Employee Partner"],
+            "active": True,
+        }
+        patch.object(
+            config,
+            "AUTH_ALLOWED_ORIGINS",
+            frozenset({"http://localhost:5173"}),
+        ).start()
+        patch.object(config, "AUTH_COOKIE_NAME", "it_helpdesk_session").start()
+        patch.object(config, "AUTH_COOKIE_SECURE", True).start()
+        patch.object(config, "AUTH_COOKIE_SAMESITE", "strict").start()
+        patch.object(config, "AUTH_SESSION_MAX_AGE", 3600).start()
+        self.authenticate_mock = patch.object(
+            odoo,
+            "authenticate_session",
+            return_value=(self.SESSION_ID, {"uid": 7}),
+        ).start()
+        self.session_info_mock = patch.object(
+            odoo,
+            "get_session_info",
+            return_value={"uid": 7},
+        ).start()
+        self.session_call_mock = patch.object(
+            odoo,
+            "session_call_kw",
+            side_effect=self.session_call_kw,
+        ).start()
+        self.destroy_mock = patch.object(odoo, "destroy_session").start()
+
+    def tearDown(self):
+        patch.stopall()
+
+    def session_call_kw(self, session_id, model, method, args=None, kwargs=None):
+        self.assertEqual(session_id, self.SESSION_ID)
+        self.assertEqual(model, "res.users")
+        if method == "read":
+            self.assertEqual(args[0], [7])
+            return [copy.deepcopy(self.user_record)]
+        if method == "has_group":
+            return args[1] in self.groups
+        raise AssertionError(f"Unexpected session ORM method: {method}")
+
+    def login(self, session_id=None, origin="http://localhost:5173"):
+        response = Response()
+        result = auth.login(
+            AuthLogin(login="employee", password="not-returned"),
+            make_auth_request("POST", session_id=session_id, origin=origin),
+            response,
+        )
+        return result, response
+
+    def test_employee_login_sets_secure_cookie_and_reads_identity_from_odoo(self):
+        self.groups.update(
+            {
+                "helpdesk_mgmt.group_helpdesk_user_own",
+                "helpdesk_mgmt.group_helpdesk_user_team",
+            }
+        )
+
+        result, response = self.login()
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["user"]["id"], 7)
+        self.assertEqual(result["user"]["partner_id"], 9)
+        self.assertEqual(result["user"]["partner"]["id"], 9)
+        self.assertEqual(result["user"]["role"], "employee")
+        self.assertFalse(result["user"]["groups"]["helpdesk_user"])
+        self.assertNotIn(self.SESSION_ID, repr(result))
+        self.assertNotIn("not-returned", repr(result))
+        cookie = response.headers["set-cookie"]
+        self.assertIn("it_helpdesk_session=", cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("Secure", cookie)
+        self.assertIn("SameSite=strict", cookie)
+        self.assertIn("Path=/api", cookie)
+        methods = [call.args[2] for call in self.session_call_mock.call_args_list]
+        self.assertEqual(methods.count("read"), 1)
+        self.assertEqual(methods.count("has_group"), len(auth.GROUPS))
+
+    def test_helpdesk_user_or_manager_is_classified_as_agent(self):
+        for group in (
+            "helpdesk_mgmt.group_helpdesk_user",
+            "helpdesk_mgmt.group_helpdesk_manager",
+        ):
+            with self.subTest(group=group):
+                self.groups = {"base.group_user", group}
+                result, _response = self.login()
+                self.assertEqual(result["user"]["role"], "agent")
+
+    def test_login_rejects_non_employee_even_with_personal_helpdesk_group(self):
+        self.groups = {"helpdesk_mgmt.group_helpdesk_user_own"}
+
+        result, _response = self.login()
+
+        self.assertEqual(result.status_code, 403)
+        self.destroy_mock.assert_called_once_with(self.SESSION_ID)
+
+    def test_login_failure_clears_cookie_without_exposing_password(self):
+        self.authenticate_mock.side_effect = HTTPException(
+            status_code=401,
+            detail="Odoo authentication failed",
+        )
+
+        result, _response = self.login(session_id=self.OLD_SESSION_ID)
+
+        self.assertEqual(result.status_code, 401)
+        self.assertNotIn(b"not-returned", result.body)
+        self.assertIn("Max-Age=0", result.headers["set-cookie"])
+
+    def test_login_rejects_untrusted_origin_before_authentication(self):
+        with self.assertRaises(HTTPException) as caught:
+            self.login(origin="https://evil.example")
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.authenticate_mock.assert_not_called()
+
+    def test_login_rejects_session_fixation(self):
+        result, _response = self.login(session_id=self.SESSION_ID)
+
+        self.assertEqual(result.status_code, 401)
+        self.destroy_mock.assert_called_once_with(self.SESSION_ID)
+
+    def test_me_validates_session_and_user_again(self):
+        result = auth.me(make_auth_request("GET", session_id=self.SESSION_ID))
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["user"]["role"], "employee")
+        self.session_info_mock.assert_called_once_with(self.SESSION_ID)
+
+    def test_me_rejects_forged_and_expired_sessions(self):
+        forged = auth.me(make_auth_request("GET", session_id="forged"))
+        self.assertEqual(forged.status_code, 401)
+        self.session_info_mock.assert_not_called()
+
+        self.session_info_mock.side_effect = HTTPException(
+            status_code=401,
+            detail="Odoo session expired",
+        )
+        expired = auth.me(make_auth_request("GET", session_id=self.SESSION_ID))
+        self.assertEqual(expired.status_code, 401)
+        self.assertIn("Max-Age=0", expired.headers["set-cookie"])
+
+    def test_logout_destroys_odoo_session_and_clears_cookie(self):
+        response = Response()
+
+        result = auth.logout(
+            make_auth_request("POST", session_id=self.SESSION_ID),
+            response,
+        )
+
+        self.assertTrue(result["success"])
+        self.destroy_mock.assert_called_once_with(self.SESSION_ID)
+        self.assertIn("Max-Age=0", response.headers["set-cookie"])
 
 
 class OcaTicketApiTests(unittest.TestCase):
@@ -1908,6 +2101,85 @@ class CategoryApiTests(unittest.TestCase):
 
 
 class OdooJson2Tests(unittest.TestCase):
+    def test_session_authentication_does_not_use_api_key(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.cookies = {"session_id": "A" * 84}
+        response.json.return_value = {"result": {"uid": 7}}
+
+        with patch.object(odoo.requests, "post", return_value=response) as post:
+            session_id, info = odoo.authenticate_session("employee", "password")
+
+        self.assertEqual(session_id, "A" * 84)
+        self.assertEqual(info["uid"], 7)
+        self.assertTrue(
+            post.call_args.args[0].endswith("/web/session/authenticate")
+        )
+        self.assertNotIn("Authorization", post.call_args.kwargs["headers"])
+        self.assertIsNone(post.call_args.kwargs["cookies"])
+        self.assertEqual(
+            post.call_args.kwargs["json"]["params"],
+            {
+                "db": config.ODOO_DB,
+                "login": "employee",
+                "password": "password",
+            },
+        )
+
+    def test_session_info_and_orm_call_forward_only_odoo_session_cookie(self):
+        session_id = "A" * 84
+        responses = []
+        for result in (
+            {"uid": 7},
+            [{"id": 7, "name": "Employee", "partner_id": [9, "Partner"]}],
+        ):
+            response = Mock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {"result": result}
+            responses.append(response)
+
+        with patch.object(
+            odoo.requests,
+            "post",
+            side_effect=responses,
+        ) as post:
+            info = odoo.get_session_info(session_id)
+            users = odoo.session_call_kw(
+                session_id,
+                "res.users",
+                "read",
+                args=[[7], ["id", "name", "partner_id"]],
+            )
+
+        self.assertEqual(info["uid"], 7)
+        self.assertEqual(users[0]["id"], 7)
+        for call in post.call_args_list:
+            self.assertEqual(call.kwargs["cookies"], {"session_id": session_id})
+            self.assertNotIn("Authorization", call.kwargs["headers"])
+        self.assertTrue(
+            post.call_args_list[0].args[0].endswith(
+                "/web/session/get_session_info"
+            )
+        )
+        self.assertTrue(
+            post.call_args_list[1].args[0].endswith(
+                "/web/dataset/call_kw/res.users/read"
+            )
+        )
+
+    def test_odoo_session_error_is_reported_as_authentication_failure(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "error": {"data": {"name": "odoo.http.SessionExpiredException"}}
+        }
+
+        with patch.object(odoo.requests, "post", return_value=response):
+            with self.assertRaises(HTTPException) as caught:
+                odoo.get_session_info("A" * 84)
+
+        self.assertEqual(caught.exception.status_code, 401)
+
     def test_search_read_sends_context_as_top_level_json2_argument(self):
         response = Mock()
         response.raise_for_status.return_value = None
