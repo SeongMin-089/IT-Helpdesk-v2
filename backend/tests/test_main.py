@@ -729,11 +729,32 @@ class OcaTicketApiTests(unittest.TestCase):
             closed=False,
         )
         unassigned_result = tickets.get_oca_tickets(unassigned=True)
+        all_when_false = tickets.get_oca_tickets(unassigned=False)
 
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["tickets"][0]["id"], 1)
         self.assertEqual(unassigned_result["total"], 1)
         self.assertEqual(unassigned_result["tickets"][0]["id"], 2)
+        self.assertEqual(all_when_false["total"], 2)
+        self.assertNotIn(
+            ["user_id", "=", False],
+            self.search_mock.call_args.kwargs["domain"],
+        )
+        self.assertNotIn(
+            ["user_id", "!=", False],
+            self.search_mock.call_args.kwargs["domain"],
+        )
+
+    def test_unassigned_and_assignee_filters_cannot_be_combined(self):
+        self.search_mock.reset_mock()
+        self.count_mock.reset_mock()
+
+        with self.assertRaises(HTTPException) as caught:
+            tickets.get_oca_tickets(unassigned=True, assignee_id=7)
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.search_mock.assert_not_called()
+        self.count_mock.assert_not_called()
 
     def test_ticket_pagination_returns_total_and_page_metadata(self):
         for ticket_id in (2, 3):

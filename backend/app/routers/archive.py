@@ -50,8 +50,8 @@ def build_ticket_list_domain(
             domain.append([field, "=", value])
     if tag_id is not None:
         domain.append(["tag_ids", "in", [tag_id]])
-    if unassigned is not None:
-        domain.append(["user_id", "=" if unassigned else "!=", False])
+    if unassigned:
+        domain.append(["user_id", "=", False])
     if closed is not None:
         domain.append(["closed", "=", closed])
     return domain
@@ -74,6 +74,11 @@ def get_oca_ticket_page(active, page=1, page_size=50, **filters):
     priority = filters.get("priority")
     if priority is not None and priority not in {"0", "1", "2", "3"}:
         raise HTTPException(status_code=422, detail="올바르지 않은 우선순위입니다.")
+    if filters.get("unassigned") is True and filters.get("assignee_id") is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="미배정 문의와 담당자를 동시에 지정할 수 없습니다.",
+        )
 
     domain = build_ticket_list_domain(active=active, **filters)
     context = {"active_test": False} if not active else None
