@@ -103,6 +103,45 @@ def search_count(model, domain=None, context=None):
         raise HTTPException(status_code=502, detail="Cannot connect to Odoo")
 
 
+def formatted_read_group(model, groupby, aggregates, domain=None):
+    _ensure_api_key()
+    payload = {
+        "domain": domain if domain is not None else [],
+        "groupby": groupby,
+        "aggregates": aggregates,
+    }
+
+    try:
+        response = requests.post(
+            f"{config.ODOO_URL}/json/2/{model}/formatted_read_group",
+            headers=_headers(),
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, list):
+            raise HTTPException(
+                status_code=502,
+                detail="Odoo grouped read returned an unexpected result",
+            )
+        return result
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Odoo request timed out")
+    except requests.exceptions.HTTPError:
+        if response.status_code in (401, 403):
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Odoo access denied: HTTP {response.status_code}",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Odoo API error: HTTP {response.status_code}",
+        )
+    except requests.exceptions.RequestException:
+        raise HTTPException(status_code=502, detail="Cannot connect to Odoo")
+
+
 def create(model, values):
     _ensure_api_key()
     try:

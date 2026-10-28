@@ -14,7 +14,7 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 import main  # noqa: E402
 from app import config  # noqa: E402
-from app.routers import archive, categories, faqs, legacy, tickets  # noqa: E402
+from app.routers import archive, categories, faqs, legacy, reference, tickets  # noqa: E402
 from app.schemas import (  # noqa: E402
     OcaCategoryCreate,
     OcaCategoryUpdate,
@@ -429,6 +429,24 @@ class MemoryOdoo:
                 context=context,
             )
         )
+
+    def formatted_read_group(self, model, groupby, aggregates, domain=None):
+        if model != "helpdesk.ticket" or aggregates != ["__count"]:
+            raise AssertionError("Unexpected grouped read")
+        field = groupby[0]
+        records = [
+            record
+            for record in self.tickets.values()
+            if self._matches(record, domain)
+        ]
+        groups = {}
+        for record in records:
+            value = copy.deepcopy(record.get(field))
+            key = tuple(value) if isinstance(value, list) else value
+            if key not in groups:
+                groups[key] = {field: value, "__count": 0}
+            groups[key]["__count"] += 1
+        return list(groups.values())
 
     def create(self, model, values):
         if model == "helpdesk.ticket.category":
@@ -1468,6 +1486,100 @@ class OcaTicketApiTests(unittest.TestCase):
         self.assertEqual(download.body, b"error")
 
 
+class DashboardApiTests(unittest.TestCase):
+    def setUp(self):
+        self.odoo = MemoryOdoo()
+        self.search_mock = patch.object(
+            odoo, "search_read", side_effect=self.odoo.search_read
+        ).start()
+        self.count_mock = patch.object(
+            odoo, "search_count", side_effect=self.odoo.search_count
+        ).start()
+        self.group_mock = patch.object(
+            odoo,
+            "formatted_read_group",
+            side_effect=self.odoo.formatted_read_group,
+        ).start()
+
+    def tearDown(self):
+        patch.stopall()
+
+    def test_dashboard_returns_summary_groups_and_recent_tickets(self):
+        closed = copy.deepcopy(self.odoo.tickets[1])
+        closed.update(
+            {
+                "id": 2,
+                "number": "T-002",
+                "stage_id": [5, "Done"],
+                "priority": "0",
+                "user_id": False,
+                "closed": True,
+                "create_date": "2026-10-27 03:00:00",
+            }
+        )
+        unassigned = copy.deepcopy(self.odoo.tickets[1])
+        unassigned.update(
+            {
+                "id": 3,
+                "number": "T-003",
+                "stage_id": [3, "In progress"],
+                "priority": "1",
+                "user_id": False,
+                "create_date": "2026-10-27 02:00:00",
+            }
+        )
+        archived = copy.deepcopy(self.odoo.tickets[1])
+        archived.update(
+            {
+                "id": 4,
+                "number": "T-004",
+                "stage_id": [4, "Resolved"],
+                "priority": "2",
+                "active": False,
+            }
+        )
+        self.odoo.tickets.update({2: closed, 3: unassigned, 4: archived})
+
+        result = reference.get_oca_dashboard()
+
+        self.assertEqual(
+            result["summary"],
+            {"total": 3, "open": 2, "closed": 1, "unassigned": 1},
+        )
+        stage_counts = {item["id"]: item["count"] for item in result["by_stage"]}
+        self.assertEqual(stage_counts[1], 0)
+        self.assertEqual(stage_counts[2], 1)
+        self.assertEqual(stage_counts[3], 1)
+        self.assertEqual(stage_counts[5], 1)
+        self.assertEqual(
+            [item["count"] for item in result["by_priority"]],
+            [1, 1, 0, 1],
+        )
+        self.assertEqual(len(result["recent_tickets"]), 3)
+
+        recent_call = self.search_mock.call_args
+        self.assertEqual(recent_call.kwargs["limit"], 5)
+        self.assertEqual(recent_call.kwargs["order"], "create_date desc, id desc")
+        self.assertEqual(recent_call.kwargs["domain"], [["active", "=", True]])
+        for call in self.count_mock.call_args_list:
+            self.assertIn(["active", "=", True], call.kwargs["domain"])
+        for call in self.group_mock.call_args_list:
+            self.assertEqual(call.kwargs["domain"], [["active", "=", True]])
+
+    def test_dashboard_includes_zero_counts_when_no_active_tickets(self):
+        self.odoo.tickets[1]["active"] = False
+
+        result = reference.get_oca_dashboard()
+
+        self.assertEqual(result["summary"]["total"], 0)
+        self.assertTrue(all(item["count"] == 0 for item in result["by_stage"]))
+        self.assertEqual(
+            [item["count"] for item in result["by_priority"]],
+            [0, 0, 0, 0],
+        )
+        self.assertEqual(result["recent_tickets"], [])
+
+
 class FaqApiTests(unittest.TestCase):
     def setUp(self):
         self.odoo = MemoryOdoo()
@@ -1876,6 +1988,38 @@ class OdooJson2Tests(unittest.TestCase):
         self.assertEqual(
             post.call_args.kwargs["json"],
             {"domain": domain, "context": {"active_test": False}},
+        )
+
+    def test_formatted_read_group_sends_odoo_19_arguments(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = [{"priority": "3", "__count": 2}]
+        domain = [["active", "=", True]]
+
+        with (
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response) as post,
+        ):
+            result = odoo.formatted_read_group(
+                "helpdesk.ticket",
+                groupby=["priority"],
+                aggregates=["__count"],
+                domain=domain,
+            )
+
+        self.assertEqual(result[0]["__count"], 2)
+        self.assertTrue(
+            post.call_args.args[0].endswith(
+                "/helpdesk.ticket/formatted_read_group"
+            )
+        )
+        self.assertEqual(
+            post.call_args.kwargs["json"],
+            {
+                "domain": domain,
+                "groupby": ["priority"],
+                "aggregates": ["__count"],
+            },
         )
 
     def test_search_read_preserves_odoo_access_denied_status(self):
