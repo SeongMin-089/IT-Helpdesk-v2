@@ -930,6 +930,52 @@ class OcaTicketApiTests(unittest.TestCase):
                     operation()
                 self.assertEqual(caught.exception.status_code, 409)
 
+    def test_closed_ticket_rejects_comment_note_and_attachment_upload(self):
+        self.odoo.tickets[1]["stage_id"] = [5, "Done"]
+        self.odoo.tickets[1]["closed"] = True
+
+        operations = (
+            lambda: tickets.create_oca_ticket_comment(
+                1, OcaTicketCommentCreate(body="Comment", kind="comment")
+            ),
+            lambda: tickets.create_oca_ticket_comment(
+                1, OcaTicketCommentCreate(body="Internal", kind="note")
+            ),
+            lambda: tickets.upload_oca_ticket_attachment(
+                1,
+                filename="file.txt",
+                content_type="text/plain",
+                file_data=b"data",
+            ),
+        )
+
+        for operation in operations:
+            with self.subTest(operation=operation):
+                with self.assertRaises(HTTPException) as caught:
+                    operation()
+                self.assertEqual(caught.exception.status_code, 409)
+
+        self.message_mock.assert_not_called()
+        self.create_mock.assert_not_called()
+
+    def test_closed_ticket_keeps_comment_attachment_read_and_download(self):
+        self.odoo.message_post(
+            "helpdesk.ticket",
+            1,
+            "<p>Existing comment</p>",
+            subtype_xmlid="mail.mt_comment",
+        )
+        self.odoo.tickets[1]["stage_id"] = [5, "Done"]
+        self.odoo.tickets[1]["closed"] = True
+
+        comments = tickets.get_oca_ticket_comments(1)
+        attachments = tickets.get_oca_ticket_attachments(1)
+        download = tickets.download_oca_ticket_attachment(1, 50)
+
+        self.assertEqual(comments["count"], 1)
+        self.assertEqual(attachments["count"], 1)
+        self.assertEqual(download.body, b"error")
+
 
 class CategoryApiTests(unittest.TestCase):
     def setUp(self):

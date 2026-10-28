@@ -99,6 +99,14 @@ def get_ticket_for_stage_change(ticket_id):
     return records[0]
 
 
+def ensure_ticket_accepts_content(ticket):
+    if ticket.get("closed"):
+        raise HTTPException(
+            status_code=409,
+            detail="종료된 문의에는 댓글이나 첨부 파일을 추가할 수 없습니다.",
+        )
+
+
 def get_ticket_workflow(ticket):
     stages = odoo.search_read(
         model="helpdesk.ticket.stage",
@@ -476,7 +484,8 @@ def get_oca_ticket_comments(ticket_id: int):
 
 @router.post("/{ticket_id}/comments", status_code=201)
 def create_oca_ticket_comment(ticket_id: int, data: OcaTicketCommentCreate):
-    get_ticket_for_stage_change(ticket_id)
+    ticket = get_ticket_for_stage_change(ticket_id)
+    ensure_ticket_accepts_content(ticket)
     safe_body = escape(data.body).replace("\n", "<br>")
     subtype_xmlid = "mail.mt_note" if data.kind == "note" else "mail.mt_comment"
     message_id = odoo.message_post(
@@ -528,7 +537,8 @@ def upload_oca_ticket_attachment(
     content_type: str = Query(min_length=1, max_length=200),
     file_data: bytes = Body(media_type="application/octet-stream"),
 ):
-    get_ticket_for_stage_change(ticket_id)
+    ticket = get_ticket_for_stage_change(ticket_id)
+    ensure_ticket_accepts_content(ticket)
     validate_attachment(filename, content_type, file_data)
     result = odoo.create(
         "ir.attachment",
