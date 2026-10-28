@@ -270,43 +270,61 @@ class MemoryOdoo:
         self.events = []
 
     @staticmethod
-    def _matches(record, domain):
-        for field, operator, value in domain or []:
-            current = record.get(field)
-            relation_value = (
-                current[0]
-                if isinstance(current, list)
-                and len(current) == 2
-                and isinstance(current[1], str)
-                else current
-            )
-            if operator == "=" and relation_value != value:
+    def _condition_matches(record, condition):
+        field, operator, value = condition
+        current = record.get(field)
+        relation_value = (
+            current[0]
+            if isinstance(current, list)
+            and len(current) == 2
+            and isinstance(current[1], str)
+            else current
+        )
+        if operator == "=":
+            return relation_value == value
+        if operator == "!=":
+            return relation_value != value
+        if operator == "in":
+            if relation_value is not current:
+                return relation_value in value
+            if isinstance(current, list):
+                return any(item in value for item in current)
+            return current in value
+        if operator == "ilike":
+            return str(value).casefold() in str(current or "").casefold()
+        if operator == "=like":
+            prefix = value[:-1] if value.endswith("%") else value
+            return str(current or "").startswith(prefix)
+        raise AssertionError(f"Unexpected domain operator: {operator}")
+
+    @classmethod
+    def _matches(cls, record, domain):
+        def evaluate(index):
+            token = domain[index]
+            if isinstance(token, str) and token in {"|", "&"}:
+                left, next_index = evaluate(index + 1)
+                right, next_index = evaluate(next_index)
+                return (
+                    left or right if token == "|" else left and right,
+                    next_index,
+                )
+            if token == "!":
+                value, next_index = evaluate(index + 1)
+                return not value, next_index
+            return cls._condition_matches(record, token), index + 1
+
+        index = 0
+        while index < len(domain or []):
+            matched, index = evaluate(index)
+            if not matched:
                 return False
-            if operator == "!=" and relation_value == value:
-                return False
-            if operator == "in":
-                if relation_value is not current:
-                    if relation_value not in value:
-                        return False
-                elif isinstance(current, list):
-                    if not any(item in value for item in current):
-                        return False
-                elif current not in value:
-                    return False
-            if operator == "ilike":
-                if str(value).casefold() not in str(current or "").casefold():
-                    return False
-            if operator == "=like":
-                prefix = value[:-1] if value.endswith("%") else value
-                if not str(current or "").startswith(prefix):
-                    return False
         return True
 
     @staticmethod
-    def _select_fields(records, fields, limit):
+    def _select_fields(records, fields, limit, offset=0):
         return [
             {field: copy.deepcopy(record.get(field)) for field in fields}
-            for record in records[:limit]
+            for record in records[offset : offset + limit]
         ]
 
     def search_read(
@@ -317,11 +335,12 @@ class MemoryOdoo:
         limit=50,
         context=None,
         order=None,
+        offset=0,
     ):
         if model == "res.users":
             records = list(self.users.values())
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "ir.model.data":
             records = [
                 {
@@ -338,27 +357,27 @@ class MemoryOdoo:
                 },
             ]
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "ir.config_parameter":
             records = list(self.parameters.values())
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "helpdesk.ticket.category":
             records = list(self.categories.values())
             if not (context or {}).get("active_test") is False:
                 records = [record for record in records if record["active"]]
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "helpdesk.ticket.stage":
             records = list(self.stages.values())
             if not (context or {}).get("active_test") is False:
                 records = [record for record in records if record["active"]]
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "mail.message":
             records = list(self.mail_messages.values())
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "mail.tracking.value":
             if self.deny_tracking_access:
                 raise HTTPException(
@@ -367,27 +386,27 @@ class MemoryOdoo:
                 )
             records = list(self.tracking_values.values())
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "ir.model.fields":
             records = list(self.model_fields.values())
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "document.page":
             records = list(self.document_pages.values())
             if not (context or {}).get("active_test") is False:
                 records = [record for record in records if record["active"]]
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "document.page.tag":
             records = list(self.document_tags.values())
             if not (context or {}).get("active_test") is False:
                 records = [record for record in records if record["active"]]
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "ir.attachment":
             records = list(self.attachments.values())
             records = [record for record in records if self._matches(record, domain)]
-            return self._select_fields(records, fields, limit)
+            return self._select_fields(records, fields, limit, offset)
         if model == "project.task":
             return []
         if model != "helpdesk.ticket":
@@ -398,7 +417,18 @@ class MemoryOdoo:
             records = [record for record in records if record["active"]]
 
         records = [record for record in records if self._matches(record, domain)]
-        return self._select_fields(records, fields, limit)
+        return self._select_fields(records, fields, limit, offset)
+
+    def search_count(self, model, domain=None, context=None):
+        return len(
+            self.search_read(
+                model=model,
+                fields=["id"],
+                domain=domain,
+                limit=1_000_000,
+                context=context,
+            )
+        )
 
     def create(self, model, values):
         if model == "helpdesk.ticket.category":
@@ -561,12 +591,16 @@ class OcaTicketApiTests(unittest.TestCase):
         self.search_patch = patch.object(
             odoo, "search_read", side_effect=self.odoo.search_read
         )
+        self.count_patch = patch.object(
+            odoo, "search_count", side_effect=self.odoo.search_count
+        )
         self.write_patch = patch.object(odoo, "write", side_effect=self.odoo.write)
         self.message_patch = patch.object(
             odoo, "message_post", side_effect=self.odoo.message_post
         )
         self.create_patch = patch.object(odoo, "create", side_effect=self.odoo.create)
-        self.search_patch.start()
+        self.search_mock = self.search_patch.start()
+        self.count_mock = self.count_patch.start()
         self.write_mock = self.write_patch.start()
         self.message_mock = self.message_patch.start()
         self.create_mock = self.create_patch.start()
@@ -616,7 +650,12 @@ class OcaTicketApiTests(unittest.TestCase):
 
         result = tickets.get_oca_tickets()
 
-        self.assertEqual(result, {"success": True, "count": 0, "tickets": []})
+        self.assertTrue(result["success"])
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["tickets"], [])
+        self.assertEqual(result["total"], 0)
+        self.assertEqual(result["total_pages"], 0)
+        self.assertFalse(result["has_next"])
 
     def test_archived_ticket_appears_in_archived_list(self):
         archive.archive_oca_ticket(1)
@@ -624,8 +663,135 @@ class OcaTicketApiTests(unittest.TestCase):
         result = archive.get_archived_oca_tickets()
 
         self.assertEqual(result["count"], 1)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["page"], 1)
+        self.assertEqual(result["page_size"], 50)
+        self.assertEqual(result["total_pages"], 1)
+        self.assertFalse(result["has_next"])
         self.assertEqual(result["tickets"][0]["id"], 1)
         self.assertFalse(result["tickets"][0]["active"])
+
+    def test_ticket_search_matches_number_title_or_description_in_odoo_domain(self):
+        title_match = copy.deepcopy(self.odoo.tickets[1])
+        title_match.update(
+            {"id": 2, "number": "T-002", "name": "Needle title"}
+        )
+        description_match = copy.deepcopy(self.odoo.tickets[1])
+        description_match.update(
+            {
+                "id": 3,
+                "number": "T-003",
+                "name": "Other",
+                "description": "Contains needle in description",
+            }
+        )
+        no_match = copy.deepcopy(self.odoo.tickets[1])
+        no_match.update(
+            {"id": 4, "number": "T-004", "name": "Other", "description": "None"}
+        )
+        self.odoo.tickets.update({2: title_match, 3: description_match, 4: no_match})
+
+        result = tickets.get_oca_tickets(q="needle")
+
+        self.assertEqual(result["total"], 2)
+        self.assertEqual([ticket["id"] for ticket in result["tickets"]], [2, 3])
+        domain = self.search_mock.call_args.kwargs["domain"]
+        self.assertIn(["number", "ilike", "needle"], domain)
+        self.assertIn(["name", "ilike", "needle"], domain)
+        self.assertIn(["description", "ilike", "needle"], domain)
+        self.assertEqual(
+            domain,
+            self.count_mock.call_args.kwargs["domain"],
+        )
+
+    def test_ticket_filters_are_combined_and_unassigned_is_distinct(self):
+        self.odoo.tickets[1]["tag_ids"] = [88]
+        unassigned = copy.deepcopy(self.odoo.tickets[1])
+        unassigned.update(
+            {
+                "id": 2,
+                "number": "T-002",
+                "user_id": False,
+                "tag_ids": [99],
+            }
+        )
+        self.odoo.tickets[2] = unassigned
+
+        result = tickets.get_oca_tickets(
+            stage_id=2,
+            priority="3",
+            category_id=4,
+            assignee_id=7,
+            partner_id=9,
+            team_id=3,
+            tag_id=88,
+            unassigned=False,
+            closed=False,
+        )
+        unassigned_result = tickets.get_oca_tickets(unassigned=True)
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["tickets"][0]["id"], 1)
+        self.assertEqual(unassigned_result["total"], 1)
+        self.assertEqual(unassigned_result["tickets"][0]["id"], 2)
+
+    def test_ticket_pagination_returns_total_and_page_metadata(self):
+        for ticket_id in (2, 3):
+            record = copy.deepcopy(self.odoo.tickets[1])
+            record.update({"id": ticket_id, "number": f"T-{ticket_id:03d}"})
+            self.odoo.tickets[ticket_id] = record
+
+        result = tickets.get_oca_tickets(page=2, page_size=2)
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(result["page"], 2)
+        self.assertEqual(result["page_size"], 2)
+        self.assertEqual(result["total_pages"], 2)
+        self.assertFalse(result["has_next"])
+        self.assertEqual(result["tickets"][0]["id"], 3)
+        self.assertEqual(self.search_mock.call_args.kwargs["offset"], 2)
+        self.assertNotIn("order", self.search_mock.call_args.kwargs)
+
+    def test_archived_list_uses_same_filters_with_inactive_context(self):
+        self.odoo.tickets[1]["active"] = False
+
+        result = archive.get_archived_oca_tickets(
+            q="Printer",
+            stage_id=2,
+            closed=False,
+            page=1,
+            page_size=10,
+        )
+
+        self.assertEqual(result["total"], 1)
+        self.assertFalse(result["tickets"][0]["active"])
+        self.assertEqual(
+            self.search_mock.call_args.kwargs["context"],
+            {"active_test": False},
+        )
+        self.assertEqual(
+            self.count_mock.call_args.kwargs["context"],
+            {"active_test": False},
+        )
+        self.assertEqual(
+            self.search_mock.call_args.kwargs["domain"],
+            self.count_mock.call_args.kwargs["domain"],
+        )
+
+    def test_ticket_list_rejects_invalid_filter_and_paging_values(self):
+        invalid_requests = (
+            {"q": "   "},
+            {"stage_id": 0},
+            {"priority": "9"},
+            {"page": 0},
+            {"page_size": 101},
+        )
+        for parameters in invalid_requests:
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(HTTPException) as caught:
+                    tickets.get_oca_tickets(**parameters)
+                self.assertEqual(caught.exception.status_code, 422)
 
     def test_archiving_an_archived_ticket_returns_409(self):
         archive.archive_oca_ticket(1)
@@ -1647,6 +1813,48 @@ class OdooJson2Tests(unittest.TestCase):
         self.assertEqual(
             post.call_args.kwargs["json"]["order"],
             "date desc, id desc",
+        )
+
+    def test_search_read_sends_offset_argument(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = []
+
+        with (
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response) as post,
+        ):
+            odoo.search_read(
+                "helpdesk.ticket",
+                ["id"],
+                offset=100,
+            )
+
+        self.assertEqual(post.call_args.kwargs["json"]["offset"], 100)
+
+    def test_search_count_sends_domain_and_context(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = 7
+        domain = [["active", "=", False]]
+
+        with (
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response) as post,
+        ):
+            result = odoo.search_count(
+                "helpdesk.ticket",
+                domain=domain,
+                context={"active_test": False},
+            )
+
+        self.assertEqual(result, 7)
+        self.assertTrue(
+            post.call_args.args[0].endswith("/helpdesk.ticket/search_count")
+        )
+        self.assertEqual(
+            post.call_args.kwargs["json"],
+            {"domain": domain, "context": {"active_test": False}},
         )
 
     def test_search_read_preserves_odoo_access_denied_status(self):

@@ -20,12 +20,21 @@ def _ensure_api_key():
         )
 
 
-def search_read(model, fields, domain=None, limit=50, context=None, order=None):
+def search_read(
+    model,
+    fields,
+    domain=None,
+    limit=50,
+    context=None,
+    order=None,
+    offset=0,
+):
     _ensure_api_key()
     payload = {
         "domain": domain if domain is not None else [],
         "fields": fields,
         "limit": limit,
+        "offset": offset,
     }
     if context is not None:
         payload["context"] = context
@@ -41,6 +50,43 @@ def search_read(model, fields, domain=None, limit=50, context=None, order=None):
         )
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.Timeout:
+        raise HTTPException(status_code=504, detail="Odoo request timed out")
+    except requests.exceptions.HTTPError:
+        if response.status_code in (401, 403):
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Odoo access denied: HTTP {response.status_code}",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Odoo API error: HTTP {response.status_code}",
+        )
+    except requests.exceptions.RequestException:
+        raise HTTPException(status_code=502, detail="Cannot connect to Odoo")
+
+
+def search_count(model, domain=None, context=None):
+    _ensure_api_key()
+    payload = {"domain": domain if domain is not None else []}
+    if context is not None:
+        payload["context"] = context
+
+    try:
+        response = requests.post(
+            f"{config.ODOO_URL}/json/2/{model}/search_count",
+            headers=_headers(),
+            json=payload,
+            timeout=15,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, int) or isinstance(result, bool) or result < 0:
+            raise HTTPException(
+                status_code=502,
+                detail="Odoo search count returned an unexpected result",
+            )
+        return result
     except requests.exceptions.Timeout:
         raise HTTPException(status_code=504, detail="Odoo request timed out")
     except requests.exceptions.HTTPError:

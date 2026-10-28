@@ -1,6 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from typing import Annotated
 
-from app.constants import OCA_TICKET_FIELDS
+from fastapi import APIRouter, HTTPException, Query
+
+from app.constants import OCA_PRIORITY_PATTERN, OCA_TICKET_FIELDS
 from app.services import odoo
 from app.transformers import transform_oca_tickets
 
@@ -8,17 +10,126 @@ from app.transformers import transform_oca_tickets
 router = APIRouter(prefix="/api/oca/tickets")
 
 
-@router.get("/archived")
-def get_archived_oca_tickets():
+def build_ticket_list_domain(
+    active,
+    q=None,
+    stage_id=None,
+    priority=None,
+    category_id=None,
+    assignee_id=None,
+    partner_id=None,
+    team_id=None,
+    tag_id=None,
+    unassigned=None,
+    closed=None,
+):
+    domain = [["active", "=", active]]
+    if q is not None:
+        query = q.strip()
+        if not query:
+            raise HTTPException(status_code=422, detail="검색어는 비워둘 수 없습니다.")
+        domain.extend(
+            [
+                "|",
+                "|",
+                ["number", "ilike", query],
+                ["name", "ilike", query],
+                ["description", "ilike", query],
+            ]
+        )
+    filters = (
+        ("stage_id", stage_id),
+        ("priority", priority),
+        ("category_id", category_id),
+        ("user_id", assignee_id),
+        ("partner_id", partner_id),
+        ("team_id", team_id),
+    )
+    for field, value in filters:
+        if value is not None:
+            domain.append([field, "=", value])
+    if tag_id is not None:
+        domain.append(["tag_ids", "in", [tag_id]])
+    if unassigned is not None:
+        domain.append(["user_id", "=" if unassigned else "!=", False])
+    if closed is not None:
+        domain.append(["closed", "=", closed])
+    return domain
+
+
+def get_oca_ticket_page(active, page=1, page_size=50, **filters):
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise HTTPException(status_code=422, detail="올바르지 않은 페이징 값입니다.")
+    for field in (
+        "stage_id",
+        "category_id",
+        "assignee_id",
+        "partner_id",
+        "team_id",
+        "tag_id",
+    ):
+        value = filters.get(field)
+        if value is not None and value <= 0:
+            raise HTTPException(status_code=422, detail=f"{field}는 양수여야 합니다.")
+    priority = filters.get("priority")
+    if priority is not None and priority not in {"0", "1", "2", "3"}:
+        raise HTTPException(status_code=422, detail="올바르지 않은 우선순위입니다.")
+
+    domain = build_ticket_list_domain(active=active, **filters)
+    context = {"active_test": False} if not active else None
+    total = odoo.search_count("helpdesk.ticket", domain=domain, context=context)
     records = odoo.search_read(
         model="helpdesk.ticket",
         fields=OCA_TICKET_FIELDS,
-        domain=[["active", "=", False]],
-        limit=50,
-        context={"active_test": False},
+        domain=domain,
+        limit=page_size,
+        offset=(page - 1) * page_size,
+        context=context,
     )
     tickets = transform_oca_tickets(records)
-    return {"success": True, "count": len(tickets), "tickets": tickets}
+    total_pages = (total + page_size - 1) // page_size
+    return {
+        "success": True,
+        "count": len(tickets),
+        "tickets": tickets,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "has_next": page < total_pages,
+    }
+
+
+@router.get("/archived")
+def get_archived_oca_tickets(
+    q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    stage_id: Annotated[int | None, Query(gt=0)] = None,
+    priority: Annotated[str | None, Query(pattern=OCA_PRIORITY_PATTERN)] = None,
+    category_id: Annotated[int | None, Query(gt=0)] = None,
+    assignee_id: Annotated[int | None, Query(gt=0)] = None,
+    partner_id: Annotated[int | None, Query(gt=0)] = None,
+    team_id: Annotated[int | None, Query(gt=0)] = None,
+    tag_id: Annotated[int | None, Query(gt=0)] = None,
+    unassigned: bool | None = None,
+    closed: bool | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+):
+    return get_oca_ticket_page(
+        active=False,
+        q=q,
+        stage_id=stage_id,
+        priority=priority,
+        category_id=category_id,
+        assignee_id=assignee_id,
+        partner_id=partner_id,
+        team_id=team_id,
+        tag_id=tag_id,
+        unassigned=unassigned,
+        closed=closed,
+        page=page,
+        page_size=page_size,
+    )
 
 
 def get_oca_ticket_including_archived(ticket_id):

@@ -2,6 +2,7 @@ import base64
 import binascii
 from html import escape
 from pathlib import PurePath
+from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, HTTPException, Query, Response
@@ -9,9 +10,10 @@ from fastapi import APIRouter, Body, HTTPException, Query, Response
 from app.constants import (
     ALLOWED_ATTACHMENT_TYPES,
     MAX_ATTACHMENT_SIZE,
+    OCA_PRIORITY_PATTERN,
     OCA_TICKET_FIELDS,
 )
-from app.routers.archive import get_oca_ticket_including_archived
+from app.routers.archive import get_oca_ticket_including_archived, get_oca_ticket_page
 from app.routers.categories import get_category_record
 from app.routers.faqs import create_faq_draft, require_faq_writes
 from app.schemas import (
@@ -261,15 +263,35 @@ def validate_attachment(filename, content_type, file_data):
 
 
 @router.get("")
-def get_oca_tickets():
-    records = odoo.search_read(
-        model="helpdesk.ticket",
-        fields=OCA_TICKET_FIELDS,
-        domain=[["active", "=", True]],
-        limit=50,
+def get_oca_tickets(
+    q: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    stage_id: Annotated[int | None, Query(gt=0)] = None,
+    priority: Annotated[str | None, Query(pattern=OCA_PRIORITY_PATTERN)] = None,
+    category_id: Annotated[int | None, Query(gt=0)] = None,
+    assignee_id: Annotated[int | None, Query(gt=0)] = None,
+    partner_id: Annotated[int | None, Query(gt=0)] = None,
+    team_id: Annotated[int | None, Query(gt=0)] = None,
+    tag_id: Annotated[int | None, Query(gt=0)] = None,
+    unassigned: bool | None = None,
+    closed: bool | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+):
+    return get_oca_ticket_page(
+        active=True,
+        q=q,
+        stage_id=stage_id,
+        priority=priority,
+        category_id=category_id,
+        assignee_id=assignee_id,
+        partner_id=partner_id,
+        team_id=team_id,
+        tag_id=tag_id,
+        unassigned=unassigned,
+        closed=closed,
+        page=page,
+        page_size=page_size,
     )
-    tickets = transform_oca_tickets(records)
-    return {"success": True, "count": len(tickets), "tickets": tickets}
 
 
 @router.get("/{ticket_id}")
