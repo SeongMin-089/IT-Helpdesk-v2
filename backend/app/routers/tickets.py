@@ -14,7 +14,11 @@ from app.constants import (
     OCA_TICKET_FIELDS,
 )
 from app.routers import auth
-from app.routers.archive import get_oca_ticket_including_archived, get_oca_ticket_page
+from app.routers.archive import (
+    TicketSort,
+    get_oca_ticket_including_archived,
+    get_oca_ticket_page,
+)
 from app.routers.categories import get_category_record
 from app.routers.faqs import create_faq_draft, require_faq_writes
 from app.schemas import (
@@ -312,6 +316,7 @@ def get_oca_tickets(
     closed: bool | None = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+    sort: TicketSort = "priority",
 ):
     return get_oca_ticket_page(
         active=True,
@@ -327,6 +332,7 @@ def get_oca_tickets(
         closed=closed,
         page=page,
         page_size=page_size,
+        sort=sort,
     )
 
 

@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  Archive,
+  BookOpenText,
+  Boxes,
   CircleUserRound,
   ClipboardList,
   Gauge,
@@ -7,6 +10,7 @@ import {
   LogOut,
   Menu,
   MessageSquarePlus,
+  Settings2,
   UserRoundCheck,
   X,
 } from 'lucide-react'
@@ -18,11 +22,16 @@ const pageTitles: Record<string, string> = {
   '/dashboard': '대시보드',
   '/tickets': '문의 관리',
   '/tickets/new': '문의 등록',
+  '/archived': '보관함',
+  '/faqs': 'FAQ',
+  '/faq-admin': 'FAQ 관리',
+  '/category-admin': '문의 유형 관리',
   '/assigned': '내 담당 문의',
 }
 
 function getPageTitle(pathname: string) {
   if (/^\/tickets\/\d+$/.test(pathname)) return '문의 상세'
+  if (/^\/faqs\/\d+$/.test(pathname)) return 'FAQ 상세'
   return pageTitles[pathname] ?? 'IT Helpdesk'
 }
 
@@ -73,8 +82,14 @@ export function AppLayout() {
           <NavLink to="/dashboard" onClick={closeMenu}><Gauge size={19} />대시보드</NavLink>
           <NavLink to="/tickets" end onClick={closeMenu}><ClipboardList size={19} />{user?.role === 'agent' ? '문의 관리' : '내 문의'}</NavLink>
           <NavLink to="/tickets/new" onClick={closeMenu}><MessageSquarePlus size={19} />문의 등록</NavLink>
+          <NavLink to="/archived" onClick={closeMenu}><Archive size={19} />보관함</NavLink>
+          <NavLink to="/faqs" onClick={closeMenu}><BookOpenText size={19} />FAQ</NavLink>
           {user?.role === 'agent' && (
-            <NavLink to="/assigned" onClick={closeMenu}><UserRoundCheck size={19} />내 담당 문의</NavLink>
+            <>
+              <NavLink to="/assigned" onClick={closeMenu}><UserRoundCheck size={19} />내 담당 문의</NavLink>
+              <NavLink to="/faq-admin" onClick={closeMenu}><Settings2 size={19} />FAQ 관리</NavLink>
+              <NavLink to="/category-admin" onClick={closeMenu}><Boxes size={19} />문의 유형 관리</NavLink>
+            </>
           )}
         </nav>
 

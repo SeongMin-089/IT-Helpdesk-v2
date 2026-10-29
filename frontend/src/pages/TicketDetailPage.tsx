@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ArrowLeft, Archive, CircleCheckBig, Pencil, RefreshCcw, Save } from 'lucide-react'
+import { Archive, ArchiveRestore, ArrowLeft, CircleCheckBig, FilePlus2, Pencil, RefreshCcw, Save } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { ErrorState, PageLoader } from '../components/common/PageState'
+import { TicketActivitySections } from '../components/tickets/TicketActivitySections'
 import { useAuth } from '../contexts/AuthContext'
 import { ApiError, apiRequest } from '../services/api'
 import { formatDate, stageLabel } from '../services/format'
@@ -10,6 +11,7 @@ import type {
   Relation,
   Stage,
   StageListResponse,
+  TicketFaqDraftResponse,
   TicketDetailResponse,
   TicketUpdateResponse,
 } from '../types/api'
@@ -46,6 +48,25 @@ function transitionRequestError(error: unknown) {
   if (error.status === 404) return '상태를 변경할 문의를 찾을 수 없습니다.'
   if (error.status === 409 || error.status === 422) return error.message
   if (error.status >= 500) return '서버 오류로 상태를 변경하지 못했습니다. 기존 문의 정보는 유지됩니다.'
+  return error.message
+}
+
+function archiveRequestError(error: unknown, action: '보관' | '복원') {
+  if (!(error instanceof ApiError)) return `문의를 ${action}하지 못했습니다.`
+  if (error.status === 401) return '로그인 상태를 다시 확인해 주세요.'
+  if (error.status === 403) return `이 문의를 ${action}할 권한이 없습니다.`
+  if (error.status === 404) return '문의 정보를 찾을 수 없습니다.'
+  if (error.status === 409 || error.status === 422) return error.message
+  if (error.status >= 500) return `서버 오류로 문의를 ${action}하지 못했습니다. 기존 문의 정보는 유지됩니다.`
+  return error.message
+}
+
+function faqDraftRequestError(error: unknown) {
+  if (!(error instanceof ApiError)) return 'FAQ 초안을 생성하지 못했습니다.'
+  if (error.status === 401) return '로그인 상태를 다시 확인해 주세요.'
+  if (error.status === 403 || error.status === 409 || error.status === 422) return error.message
+  if (error.status === 404) return '문의를 찾을 수 없습니다.'
+  if (error.status >= 500) return '서버 오류로 FAQ 초안을 생성하지 못했습니다.'
   return error.message
 }
 
@@ -91,6 +112,17 @@ export function TicketDetailPage() {
   const [transitionSaving, setTransitionSaving] = useState(false)
   const transitionSavingRef = useRef<symbol | null>(null)
 
+  const [confirmingArchive, setConfirmingArchive] = useState(false)
+  const [archiveSaving, setArchiveSaving] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
+  const archiveSavingRef = useRef<symbol | null>(null)
+
+  const [confirmingFaqDraft, setConfirmingFaqDraft] = useState(false)
+  const [faqDraftSaving, setFaqDraftSaving] = useState(false)
+  const [faqDraftError, setFaqDraftError] = useState('')
+  const [createdFaqDraft, setCreatedFaqDraft] = useState<TicketFaqDraftResponse['faq'] | null>(null)
+  const faqDraftSavingRef = useRef<symbol | null>(null)
+
   useEffect(() => {
     mountedRef.current = true
     return () => {
@@ -120,6 +152,8 @@ export function TicketDetailPage() {
           originalSavingRef.current = null
           managementSavingRef.current = null
           transitionSavingRef.current = null
+          archiveSavingRef.current = null
+          faqDraftSavingRef.current = null
           setOriginalSaving(false)
           setManagementSaving(false)
           setTransitionSaving(false)
@@ -128,6 +162,13 @@ export function TicketDetailPage() {
           setReprocessReason('')
           setConfirmingClose(false)
           setTransitionError('')
+          setConfirmingArchive(false)
+          setArchiveSaving(false)
+          setArchiveError('')
+          setConfirmingFaqDraft(false)
+          setFaqDraftSaving(false)
+          setFaqDraftError('')
+          setCreatedFaqDraft(null)
         }
       })
       .catch((caught: unknown) => {
@@ -230,7 +271,7 @@ export function TicketDetailPage() {
 
   const saveOriginal = async (event: FormEvent) => {
     event.preventDefault()
-    if (originalSavingRef.current || managementSavingRef.current || transitionSavingRef.current) return
+    if (originalSavingRef.current || managementSavingRef.current || transitionSavingRef.current || archiveSavingRef.current || faqDraftSavingRef.current) return
     const normalizedTitle = editTitle.trim()
     const normalizedDescription = editDescription.trim()
     if (!normalizedTitle) {
@@ -281,7 +322,7 @@ export function TicketDetailPage() {
 
   const saveManagement = async (event: FormEvent) => {
     event.preventDefault()
-    if (managementSavingRef.current || originalSavingRef.current || transitionSavingRef.current || managementReadOnly) return
+    if (managementSavingRef.current || originalSavingRef.current || transitionSavingRef.current || archiveSavingRef.current || faqDraftSavingRef.current || managementReadOnly) return
     const nextAssigneeId = selectedAssigneeId ? Number(selectedAssigneeId) : null
     const payload: { priority?: string; assignee_id?: number | null } = {}
     if (selectedPriority !== ticket.priority_code) payload.priority = selectedPriority
@@ -320,6 +361,8 @@ export function TicketDetailPage() {
       transitionSavingRef.current
       || originalSavingRef.current
       || managementSavingRef.current
+      || archiveSavingRef.current
+      || faqDraftSavingRef.current
       || !workflowReady
       || !ticket.active
       || ticket.closed
@@ -388,18 +431,100 @@ export function TicketDetailPage() {
     void performTransition('/reprocess', { reason: normalized })
   }
 
-  const transitionControlsDisabled = transitionSaving || originalSaving || managementSaving || editingOriginal
+  const performArchiveAction = async (action: 'archive' | 'restore') => {
+    if (
+      archiveSavingRef.current
+      || originalSavingRef.current
+      || managementSavingRef.current
+      || transitionSavingRef.current
+      || faqDraftSavingRef.current
+    ) return
+    const requestTicketId = ticket.id
+    const requestToken = Symbol(`ticket-${action}`)
+    archiveSavingRef.current = requestToken
+    setArchiveSaving(true)
+    setArchiveError('')
+    try {
+      const response = await apiRequest<TicketUpdateResponse>(`/api/oca/tickets/${requestTicketId}/${action}`, { method: 'PATCH' })
+      if (!mountedRef.current || activeTicketIdRef.current !== requestTicketId || archiveSavingRef.current !== requestToken) return
+      setResult({ id: requestTicketId, data: { success: true, ticket: response.ticket } })
+      setConfirmingArchive(false)
+      setConfirmingFaqDraft(false)
+      setEditingOriginal(false)
+      setEditTitle('')
+      setEditDescription('')
+      setTransitionMode(null)
+      setConfirmingClose(false)
+      setManagementPriority(undefined)
+      setManagementAssigneeId(undefined)
+      setOriginalError('')
+      setManagementError('')
+      setTransitionError('')
+    } catch (caught) {
+      if (mountedRef.current && activeTicketIdRef.current === requestTicketId && archiveSavingRef.current === requestToken) {
+        setArchiveError(archiveRequestError(caught, action === 'archive' ? '보관' : '복원'))
+      }
+    } finally {
+      if (archiveSavingRef.current === requestToken) {
+        archiveSavingRef.current = null
+        if (mountedRef.current && activeTicketIdRef.current === requestTicketId) setArchiveSaving(false)
+      }
+    }
+  }
+
+  const createFaqDraft = async () => {
+    if (
+      faqDraftSavingRef.current
+      || originalSavingRef.current
+      || managementSavingRef.current
+      || transitionSavingRef.current
+      || archiveSavingRef.current
+      || createdFaqDraft
+    ) return
+    const requestTicketId = ticket.id
+    const requestToken = Symbol('ticket-faq-draft')
+    faqDraftSavingRef.current = requestToken
+    setFaqDraftSaving(true)
+    setFaqDraftError('')
+    try {
+      const response = await apiRequest<TicketFaqDraftResponse>(`/api/oca/tickets/${requestTicketId}/faq-drafts`, { method: 'POST' })
+      if (!mountedRef.current || activeTicketIdRef.current !== requestTicketId || faqDraftSavingRef.current !== requestToken) return
+      setCreatedFaqDraft(response.faq)
+      setConfirmingFaqDraft(false)
+    } catch (caught) {
+      if (mountedRef.current && activeTicketIdRef.current === requestTicketId && faqDraftSavingRef.current === requestToken) {
+        setFaqDraftError(faqDraftRequestError(caught))
+      }
+    } finally {
+      if (faqDraftSavingRef.current === requestToken) {
+        faqDraftSavingRef.current = null
+        if (mountedRef.current && activeTicketIdRef.current === requestTicketId) setFaqDraftSaving(false)
+      }
+    }
+  }
+
+  const transitionControlsDisabled = transitionSaving || originalSaving || managementSaving || archiveSaving || faqDraftSaving || editingOriginal
   const canUseTransitions = workflowReady && ticket.active && !ticket.closed
   const hasAvailableTransition = (
     user?.role === 'agent' && workflowPosition >= 0 && workflowPosition <= 2
   ) || (isOwner && workflowPosition === 3)
+  const canArchiveOrRestore = user?.role === 'agent'
+    || Boolean(isOwner && workflowReady && (workflowPosition === 0 || workflowPosition === 1))
+  const listPath = ticket.active ? '/tickets' : '/archived'
+  const canCreateFaqDraft = user?.role === 'agent' && ticket.active && workflowReady && (workflowPosition === 3 || workflowPosition === 4)
 
   return (
     <div className="page-stack">
       <header className="page-heading page-heading--inline">
         <div><p className="eyebrow">TICKET DETAIL</p><h1>{ticket.title}</h1><p className="detail-reference">{ticket.reference || `#${ticket.id}`}</p></div>
-        <Link className="button button--secondary" to="/tickets"><ArrowLeft size={17} />목록으로</Link>
+        <div className="detail-header-actions">
+          {canArchiveOrRestore && (ticket.active ? <button className="button button--secondary" type="button" onClick={() => { setConfirmingArchive(true); setArchiveError('') }} disabled={archiveSaving || originalSaving || managementSaving || transitionSaving || faqDraftSaving || editingOriginal}><Archive size={17} />보관</button> : <button className="button button--primary" type="button" onClick={() => void performArchiveAction('restore')} disabled={archiveSaving || originalSaving || managementSaving || transitionSaving || faqDraftSaving}><ArchiveRestore size={17} />{archiveSaving ? '복원 중...' : '복원'}</button>)}
+          <Link className="button button--secondary" to={listPath}><ArrowLeft size={17} />{ticket.active ? '목록으로' : '보관함으로'}</Link>
+        </div>
       </header>
+
+      {confirmingArchive && ticket.active && <div className="workflow-confirm archive-confirm" role="alert"><p>문의를 보관하면 수정과 상태 변경, 댓글·첨부파일 작성이 제한됩니다. 보관하시겠습니까?</p><div><button className="button button--secondary" type="button" onClick={() => { setConfirmingArchive(false); setArchiveError('') }} disabled={archiveSaving}>취소</button><button className="button button--primary" type="button" onClick={() => void performArchiveAction('archive')} disabled={archiveSaving}>{archiveSaving ? '보관 중...' : '보관 확인'}</button></div></div>}
+      {archiveError && <div className="form-error detail-form-error" role="alert">{archiveError}</div>}
 
       <section className="card workflow-card">
         <div className="workflow-card__heading"><div><h2>업무 진행 상태</h2><p>현재 상태와 처리 단계를 확인합니다.</p></div><span className="status-badge">{stageLabel(ticket.status?.name)}</span></div>
@@ -426,10 +551,14 @@ export function TicketDetailPage() {
         )}
       </section>
 
-      <section className="detail-grid">
-        <article className="card detail-main">
+      {user && <TicketActivitySections
+        key={ticket.id}
+        ticket={ticket}
+        user={user}
+        refreshKey={`${ticket.updated_at ?? ''}:${ticket.status?.id ?? ''}:${ticket.assignee?.id ?? ''}:${ticket.active}`}
+        mainContent={<article className="card detail-main">
           <div className="detail-section">
-            <div className="detail-section__heading"><h2>문의 내용</h2>{canEditOriginal && !editingOriginal && <button className="button button--secondary" type="button" onClick={startOriginalEdit} disabled={managementSaving || transitionSaving}><Pencil size={16} />수정</button>}</div>
+            <div className="detail-section__heading"><h2>문의 내용</h2>{canEditOriginal && !editingOriginal && <button className="button button--secondary" type="button" onClick={startOriginalEdit} disabled={managementSaving || transitionSaving || archiveSaving || faqDraftSaving}><Pencil size={16} />수정</button>}</div>
             {editingOriginal ? (
               <form className="detail-edit-form" onSubmit={saveOriginal} noValidate>
                 <label className="form-field"><span>제목 <strong>*</strong></span><input value={editTitle} onChange={(event) => setEditTitle(event.target.value)} maxLength={200} required disabled={originalSaving} /><small>{editTitle.length} / 200</small></label>
@@ -439,9 +568,8 @@ export function TicketDetailPage() {
               </form>
             ) : <p className="ticket-description">{ticket.description || '등록된 내용이 없습니다.'}</p>}
           </div>
-        </article>
-
-        <div className="detail-side-column">
+        </article>}
+        sidebarContent={<>
           <aside className="card detail-sidebar">
             <div className="detail-badges"><span className="status-badge">{stageLabel(ticket.status?.name)}</span><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span>{!ticket.active && <span className="state-badge state-badge--archived"><Archive size={13} />보관됨</span>}{ticket.closed && <span className="state-badge state-badge--closed"><CircleCheckBig size={13} />종료됨</span>}</div>
             <dl className="detail-list">
@@ -458,16 +586,25 @@ export function TicketDetailPage() {
           {user?.role === 'agent' && <section className="card detail-management">
             <div className="detail-management__heading"><h2>문의 관리</h2><p>{managementReadOnly ? '종료·보관 문의는 변경할 수 없습니다.' : '긴급도와 담당자를 변경합니다.'}</p></div>
             <form className="detail-management__form" onSubmit={saveManagement}>
-              <label className="form-field"><span>긴급도</span><select value={selectedPriority} onChange={(event) => { setManagementPriority(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving || transitionSaving}>{priorityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-              <label className="form-field"><span>담당자</span><select value={selectedAssigneeId} onChange={(event) => { setManagementAssigneeId(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving || transitionSaving || assigneesLoading || Boolean(assigneesError)}><option value="">미배정</option>{currentAssigneeMissing && ticket.assignee && <option value={ticket.assignee.id}>{ticket.assignee.name} (현재 담당자)</option>}{assignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label>
+              <label className="form-field"><span>긴급도</span><select value={selectedPriority} onChange={(event) => { setManagementPriority(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving || transitionSaving || archiveSaving || faqDraftSaving}>{priorityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+              <label className="form-field"><span>담당자</span><select value={selectedAssigneeId} onChange={(event) => { setManagementAssigneeId(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving || transitionSaving || archiveSaving || faqDraftSaving || assigneesLoading || Boolean(assigneesError)}><option value="">미배정</option>{currentAssigneeMissing && ticket.assignee && <option value={ticket.assignee.id}>{ticket.assignee.name} (현재 담당자)</option>}{assignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label>
               {assigneesLoading && <p className="detail-helper">담당자 목록을 불러오는 중입니다.</p>}
               {assigneesError && <div className="detail-load-error" role="alert"><span>{assigneesError}</span><button className="button button--secondary" type="button" onClick={() => { setAssigneesLoading(true); setAssigneesError(''); setAssigneesRetryKey((value) => value + 1) }}>다시 시도</button></div>}
               {managementError && <div className="form-error detail-form-error" role="alert">{managementError}</div>}
-              <button className="button button--primary" type="submit" disabled={managementReadOnly || managementSaving || originalSaving || transitionSaving}><Save size={16} />{managementSaving ? '저장 중...' : '관리 정보 저장'}</button>
+              <button className="button button--primary" type="submit" disabled={managementReadOnly || managementSaving || originalSaving || transitionSaving || archiveSaving || faqDraftSaving}><Save size={16} />{managementSaving ? '저장 중...' : '관리 정보 저장'}</button>
             </form>
           </section>}
-        </div>
-      </section>
+
+          {canCreateFaqDraft && <section className="card detail-management faq-ticket-card">
+            <div className="detail-management__heading"><h2>FAQ 초안</h2><p>문의 해결 내용을 비공개 FAQ 초안으로 생성합니다.</p></div>
+            <div className="faq-ticket-card__body">
+              {createdFaqDraft ? <div className="faq-draft-success"><strong>{createdFaqDraft.name}</strong><span>비공개 초안이 생성되었습니다. 검토 후 공개해 주세요.</span><Link className="button button--primary" to={`/faq-admin?faq=${createdFaqDraft.id}`}>FAQ 관리로 이동</Link></div> : <button className="button button--secondary" type="button" onClick={() => { setConfirmingFaqDraft(true); setFaqDraftError('') }} disabled={faqDraftSaving || originalSaving || managementSaving || transitionSaving || archiveSaving}><FilePlus2 size={16} />FAQ 초안 생성</button>}
+              {confirmingFaqDraft && !createdFaqDraft && <div className="workflow-confirm faq-confirm" role="alert"><p>이 문의의 해결 내용으로 비공개 FAQ 초안을 생성하시겠습니까?</p><div><button className="button button--secondary" type="button" onClick={() => { setConfirmingFaqDraft(false); setFaqDraftError('') }} disabled={faqDraftSaving}>취소</button><button className="button button--primary" type="button" onClick={() => void createFaqDraft()} disabled={faqDraftSaving}>{faqDraftSaving ? '생성 중...' : '생성 확인'}</button></div></div>}
+              {faqDraftError && <div className="form-error detail-form-error" role="alert">{faqDraftError}</div>}
+            </div>
+          </section>}
+        </>}
+      />}
     </div>
   )
 }

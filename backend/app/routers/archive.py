@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -9,6 +9,14 @@ from app.transformers import transform_oca_tickets
 
 
 router = APIRouter(prefix="/api/oca/tickets")
+
+TicketSort = Literal["priority", "newest", "oldest", "updated"]
+TICKET_SORT_ORDERS = {
+    "priority": "priority desc, create_date desc, id desc",
+    "newest": "create_date desc, id desc",
+    "oldest": "create_date asc, id asc",
+    "updated": "write_date desc, id desc",
+}
 
 
 def build_ticket_list_domain(
@@ -58,7 +66,7 @@ def build_ticket_list_domain(
     return domain
 
 
-def get_oca_ticket_page(active, page=1, page_size=50, **filters):
+def get_oca_ticket_page(active, page=1, page_size=50, sort="priority", **filters):
     if page < 1 or page_size < 1 or page_size > 100:
         raise HTTPException(status_code=422, detail="올바르지 않은 페이징 값입니다.")
     for field in (
@@ -80,6 +88,9 @@ def get_oca_ticket_page(active, page=1, page_size=50, **filters):
             status_code=422,
             detail="미배정 문의와 담당자를 동시에 지정할 수 없습니다.",
         )
+    order = TICKET_SORT_ORDERS.get(sort)
+    if order is None:
+        raise HTTPException(status_code=422, detail="올바르지 않은 정렬 기준입니다.")
 
     domain = build_ticket_list_domain(active=active, **filters)
     user = auth.get_current_user()
@@ -93,6 +104,7 @@ def get_oca_ticket_page(active, page=1, page_size=50, **filters):
         domain=domain,
         limit=page_size,
         offset=(page - 1) * page_size,
+        order=order,
         context=context,
     )
     tickets = transform_oca_tickets(records)
@@ -123,6 +135,7 @@ def get_archived_oca_tickets(
     closed: bool | None = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+    sort: TicketSort = "priority",
 ):
     return get_oca_ticket_page(
         active=False,
@@ -138,6 +151,7 @@ def get_archived_oca_tickets(
         closed=closed,
         page=page,
         page_size=page_size,
+        sort=sort,
     )
 
 

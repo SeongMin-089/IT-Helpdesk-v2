@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronLeft, ChevronRight, Filter, Search } from 'lucide-react'
+import { ArrowUpDown, ChevronLeft, ChevronRight, Filter, Search } from 'lucide-react'
 import { Link, useNavigate } from 'react-router'
 import { EmptyState, ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
@@ -15,13 +15,21 @@ const priorityOptions = [
   { value: '3', label: '긴급' },
 ]
 
-export function TicketsPage({ assignedOnly = false }: { assignedOnly?: boolean }) {
+const sortOptions = [
+  { value: 'priority', label: '긴급도순' },
+  { value: 'newest', label: '최신 등록순' },
+  { value: 'oldest', label: '오래된 등록순' },
+  { value: 'updated', label: '최근 수정순' },
+]
+
+export function TicketsPage({ assignedOnly = false, archivedOnly = false }: { assignedOnly?: boolean; archivedOnly?: boolean }) {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [stageId, setStageId] = useState('')
   const [priority, setPriority] = useState('')
+  const [sort, setSort] = useState('priority')
   const [page, setPage] = useState(1)
   const [stages, setStages] = useState<Stage[]>([])
   const [stagesLoading, setStagesLoading] = useState(true)
@@ -62,14 +70,15 @@ export function TicketsPage({ assignedOnly = false }: { assignedOnly?: boolean }
   }, [stagesRetryKey])
 
   const query = useMemo(
-    () => toQuery({ q: debouncedSearch, stage_id: stageId, priority, page, page_size: 20, assignee_id: assignedOnly ? user?.id : undefined }),
-    [assignedOnly, debouncedSearch, page, priority, stageId, user?.id],
+    () => toQuery({ q: debouncedSearch, stage_id: stageId, priority, sort, page, page_size: 20, assignee_id: assignedOnly ? user?.id : undefined }),
+    [assignedOnly, debouncedSearch, page, priority, sort, stageId, user?.id],
   )
+  const listPath = archivedOnly ? '/api/oca/tickets/archived' : '/api/oca/tickets'
 
   useEffect(() => {
     const controller = new AbortController()
     const requestId = ++requestIdRef.current
-    void apiRequest<TicketListResponse>(`/api/oca/tickets${query}`, { signal: controller.signal })
+    void apiRequest<TicketListResponse>(`${listPath}${query}`, { signal: controller.signal })
       .then((response) => {
         if (!controller.signal.aborted && requestId === requestIdRef.current) setData(response)
       })
@@ -84,12 +93,19 @@ export function TicketsPage({ assignedOnly = false }: { assignedOnly?: boolean }
       controller.abort()
       requestIdRef.current += 1
     }
-  }, [query, retryKey])
+  }, [listPath, query, retryKey])
+
+  const pageHeading = archivedOnly ? '보관함' : assignedOnly ? '내 담당 문의' : user?.role === 'agent' ? '전체 문의' : '내 문의'
+  const pageDescription = archivedOnly
+    ? '보관된 문의를 검색하고 필터링할 수 있습니다.'
+    : assignedOnly
+      ? '현재 나에게 배정된 문의를 확인합니다.'
+      : '문의 현황을 검색하고 필터링할 수 있습니다.'
 
   return (
     <div className="page-stack">
       <header className="page-heading page-heading--inline">
-        <div><p className="eyebrow">TICKETS</p><h1>{assignedOnly ? '내 담당 문의' : user?.role === 'agent' ? '전체 문의' : '내 문의'}</h1><p>{assignedOnly ? '현재 나에게 배정된 문의를 확인합니다.' : '문의 현황을 검색하고 필터링할 수 있습니다.'}</p></div>
+        <div><p className="eyebrow">{archivedOnly ? 'ARCHIVED TICKETS' : 'TICKETS'}</p><h1>{pageHeading}</h1><p>{pageDescription}</p></div>
         {data && <span className="result-count">총 <strong>{data.total.toLocaleString()}</strong>건</span>}
       </header>
 
@@ -97,12 +113,13 @@ export function TicketsPage({ assignedOnly = false }: { assignedOnly?: boolean }
         <label className="search-box"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="문의 번호, 제목, 내용 검색" aria-label="문의 검색" /></label>
         <div className="filter-select"><Filter size={17} /><select value={stageId} onChange={(event) => { setLoading(true); setError(''); setPage(1); setStageId(event.target.value) }} aria-label="상태 필터" disabled={stagesLoading || Boolean(stagesError)}><option value="">{stagesLoading ? '상태 불러오는 중' : stagesError ? '상태 로딩 실패' : '전체 상태'}</option>{stages.map((stage) => <option key={stage.id} value={stage.id}>{stageLabel(stage.name)}</option>)}</select></div>
         <div className="filter-select"><select value={priority} onChange={(event) => { setLoading(true); setError(''); setPage(1); setPriority(event.target.value) }} aria-label="긴급도 필터">{priorityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
+        <div className="filter-select"><ArrowUpDown size={17} /><select value={sort} onChange={(event) => { setLoading(true); setError(''); setPage(1); setSort(event.target.value) }} aria-label="문의 정렬">{sortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
       </section>
 
       {stagesError && <div className="form-error" role="alert">{stagesError} <button className="button button--secondary" type="button" onClick={() => { setStagesLoading(true); setStagesError(''); setStagesRetryKey((value) => value + 1) }}>상태 목록 다시 시도</button></div>}
 
       <section className="card tickets-card">
-        {loading ? <PageLoader label="문의 목록을 불러오는 중입니다." /> : error ? <ErrorState message={error} onRetry={() => { setLoading(true); setError(''); setRetryKey((value) => value + 1) }} /> : !data || data.tickets.length === 0 ? <EmptyState message="조건에 맞는 문의가 없습니다." /> : (
+        {loading ? <PageLoader label={archivedOnly ? '보관된 문의를 불러오는 중입니다.' : '문의 목록을 불러오는 중입니다.'} /> : error ? <ErrorState message={error} onRetry={() => { setLoading(true); setError(''); setRetryKey((value) => value + 1) }} /> : !data || data.tickets.length === 0 ? <EmptyState message={archivedOnly ? '조건에 맞는 보관 문의가 없습니다.' : '조건에 맞는 문의가 없습니다.'} /> : (
           <>
             <div className="table-wrap">
               <table><thead><tr><th>문의 번호</th><th>제목</th><th>유형</th><th>요청자</th><th>담당자</th><th>상태</th><th>긴급도</th><th>등록일</th></tr></thead>

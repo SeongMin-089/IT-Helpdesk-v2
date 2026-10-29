@@ -41,6 +41,11 @@ def get_oca_dashboard():
             + [["closed", "=", False], ["user_id", "=", False]],
         ),
     }
+    if user["role"] == "agent":
+        summary["assigned_to_me"] = odoo.search_count(
+            "helpdesk.ticket",
+            domain=active_domain + [["user_id", "=", user["id"]]],
+        )
 
     stages = odoo.search_read(
         model="helpdesk.ticket.stage",

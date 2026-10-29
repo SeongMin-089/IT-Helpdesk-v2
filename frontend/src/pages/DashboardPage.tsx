@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CircleCheckBig, CircleDot, Inbox, TicketCheck } from 'lucide-react'
+import { CircleCheckBig, CircleDot, Inbox, TicketCheck, UserRoundCheck } from 'lucide-react'
 import { Link, useNavigate } from 'react-router'
 import { EmptyState, ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
@@ -56,13 +56,19 @@ export function DashboardPage() {
         <div><p className="eyebrow">OVERVIEW</p><h1>안녕하세요, {user?.name}님</h1><p>현재 IT 문의 처리 현황을 확인하세요.</p></div>
       </header>
 
-      <section className="summary-grid" aria-label="문의 요약">
+      <section className={`summary-grid${user?.role === 'agent' ? ' summary-grid--agent' : ''}`} aria-label="문의 요약">
         {summaryCards.map(({ key, label, helper, icon: Icon }) => (
           <article className="summary-card" key={key}>
             <span className={`summary-card__icon summary-card__icon--${key}`}><Icon size={21} /></span>
             <div><span>{label}</span><strong>{data.summary[key].toLocaleString()}</strong><small>{helper}</small></div>
           </article>
         ))}
+        {user?.role === 'agent' && data.summary.assigned_to_me !== undefined && (
+          <Link className="summary-card summary-card--link" to="/assigned">
+            <span className="summary-card__icon summary-card__icon--assigned"><UserRoundCheck size={21} /></span>
+            <div><span>내 담당 문의</span><strong>{data.summary.assigned_to_me.toLocaleString()}</strong><small>현재 나에게 배정된 활성 문의</small></div>
+          </Link>
+        )}
       </section>
 
       <section className="dashboard-grid">

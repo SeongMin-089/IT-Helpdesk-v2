@@ -1169,7 +1169,31 @@ class OcaTicketApiTests(unittest.TestCase):
         self.assertFalse(result["has_next"])
         self.assertEqual(result["tickets"][0]["id"], 3)
         self.assertEqual(self.search_mock.call_args.kwargs["offset"], 2)
-        self.assertNotIn("order", self.search_mock.call_args.kwargs)
+        self.assertEqual(
+            self.search_mock.call_args.kwargs["order"],
+            "priority desc, create_date desc, id desc",
+        )
+
+    def test_ticket_list_passes_only_allowed_stable_sort_orders(self):
+        expected_orders = {
+            "priority": "priority desc, create_date desc, id desc",
+            "newest": "create_date desc, id desc",
+            "oldest": "create_date asc, id asc",
+            "updated": "write_date desc, id desc",
+        }
+        for sort, expected_order in expected_orders.items():
+            with self.subTest(sort=sort, archived=False):
+                tickets.get_oca_tickets(sort=sort)
+                self.assertEqual(
+                    self.search_mock.call_args.kwargs["order"],
+                    expected_order,
+                )
+            with self.subTest(sort=sort, archived=True):
+                archive.get_archived_oca_tickets(sort=sort)
+                self.assertEqual(
+                    self.search_mock.call_args.kwargs["order"],
+                    expected_order,
+                )
 
     def test_archived_list_uses_same_filters_with_inactive_context(self):
         self.odoo.tickets[1]["active"] = False
@@ -1202,6 +1226,7 @@ class OcaTicketApiTests(unittest.TestCase):
             {"q": "   "},
             {"stage_id": 0},
             {"priority": "9"},
+            {"sort": "invalid"},
             {"page": 0},
             {"page_size": 101},
         )
@@ -2037,7 +2062,13 @@ class DashboardApiTests(unittest.TestCase):
 
         self.assertEqual(
             result["summary"],
-            {"total": 3, "open": 2, "closed": 1, "unassigned": 1},
+            {
+                "total": 3,
+                "open": 2,
+                "closed": 1,
+                "unassigned": 1,
+                "assigned_to_me": 1,
+            },
         )
         stage_counts = {item["id"]: item["count"] for item in result["by_stage"]}
         self.assertEqual(stage_counts[1], 0)
@@ -2056,6 +2087,10 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(recent_call.kwargs["domain"], [["active", "=", True]])
         for call in self.count_mock.call_args_list:
             self.assertIn(["active", "=", True], call.kwargs["domain"])
+        self.assertIn(
+            [["active", "=", True], ["user_id", "=", TEST_AGENT["id"]]],
+            [call.kwargs["domain"] for call in self.count_mock.call_args_list],
+        )
         for call in self.group_mock.call_args_list:
             self.assertEqual(call.kwargs["domain"], [["active", "=", True]])
 
@@ -2083,6 +2118,7 @@ class DashboardApiTests(unittest.TestCase):
             auth.CURRENT_USER.reset(token)
 
         self.assertEqual(result["summary"]["total"], 1)
+        self.assertNotIn("assigned_to_me", result["summary"])
         expected = ["partner_id", "=", TEST_EMPLOYEE_A["partner_id"]]
         for call in self.count_mock.call_args_list:
             self.assertIn(expected, call.kwargs["domain"])
