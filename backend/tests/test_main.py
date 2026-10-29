@@ -772,6 +772,7 @@ class AuthApiTests(unittest.TestCase):
         result, _response = self.login()
 
         self.assertEqual(result.status_code, 403)
+        self.assertIn("Max-Age=0", result.headers["set-cookie"])
         self.destroy_mock.assert_called_once_with(self.SESSION_ID)
 
     def test_login_failure_clears_cookie_without_exposing_password(self):
@@ -818,6 +819,41 @@ class AuthApiTests(unittest.TestCase):
         expired = auth.me(make_auth_request("GET", session_id=self.SESSION_ID))
         self.assertEqual(expired.status_code, 401)
         self.assertIn("Max-Age=0", expired.headers["set-cookie"])
+
+    def test_me_preserves_cookie_for_odoo_server_errors(self):
+        for status_code in (502, 504):
+            with self.subTest(status_code=status_code):
+                self.session_info_mock.reset_mock()
+                self.session_info_mock.side_effect = HTTPException(
+                    status_code=status_code,
+                    detail="Odoo server unavailable",
+                )
+
+                result = auth.me(
+                    make_auth_request("GET", session_id=self.SESSION_ID)
+                )
+
+                self.assertEqual(result.status_code, status_code)
+                self.assertNotIn("set-cookie", result.headers)
+
+    def test_logout_preserves_cookie_when_odoo_session_destroy_fails(self):
+        for status_code in (502, 504):
+            with self.subTest(status_code=status_code):
+                self.destroy_mock.reset_mock()
+                self.destroy_mock.side_effect = HTTPException(
+                    status_code=status_code,
+                    detail="Odoo server unavailable",
+                )
+                response = Response()
+
+                result = auth.logout(
+                    make_auth_request("POST", session_id=self.SESSION_ID),
+                    response,
+                )
+
+                self.assertEqual(result.status_code, status_code)
+                self.assertNotIn("set-cookie", result.headers)
+                self.assertNotIn("set-cookie", response.headers)
 
     def test_logout_destroys_odoo_session_and_clears_cookie(self):
         response = Response()

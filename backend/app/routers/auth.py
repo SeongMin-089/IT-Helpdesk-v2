@@ -57,7 +57,8 @@ def auth_error_response(error):
         status_code=error.status_code,
         content={"detail": error.detail},
     )
-    clear_session_cookie(response)
+    if error.status_code in (401, 403):
+        clear_session_cookie(response)
     return response
 
 
