@@ -383,6 +383,11 @@ def create_oca_ticket(data: OcaTicketCreate):
                 status_code=422,
                 detail="비활성 문의 유형은 선택할 수 없습니다.",
             )
+        if user["role"] != "agent" and not category.get("show_in_portal"):
+            raise HTTPException(
+                status_code=403,
+                detail="포털에 표시되지 않는 문의 유형은 선택할 수 없습니다.",
+            )
         values["category_id"] = data.category_id
         auto_assignee = assignments.get_category_default_assignees(
             {data.category_id}

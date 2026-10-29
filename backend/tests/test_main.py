@@ -2422,6 +2422,59 @@ class CategoryApiTests(unittest.TestCase):
         self.assertNotIn(10, [item["id"] for item in categories.get_oca_categories()["categories"]])
         self.assertIn(10, [item["id"] for item in categories.get_all_oca_categories()["categories"]])
 
+    def test_employee_can_create_ticket_with_portal_category(self):
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            result = tickets.create_oca_ticket(
+                OcaTicketCreate(
+                    title="Employee ticket",
+                    description="Description",
+                    category_id=10,
+                )
+            )
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        self.assertEqual(result["ticket_id"], 2)
+        self.assertEqual(self.odoo.created_ticket_values["category_id"], 10)
+        self.assertEqual(
+            self.odoo.created_ticket_values["partner_id"],
+            TEST_EMPLOYEE_A["partner_id"],
+        )
+
+    def test_employee_cannot_create_ticket_with_non_portal_category(self):
+        self.odoo.categories[10]["show_in_portal"] = False
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            with patch.object(tickets, "odoo_create_ticket") as create:
+                with self.assertRaises(HTTPException) as caught:
+                    tickets.create_oca_ticket(
+                        OcaTicketCreate(
+                            title="Hidden category",
+                            description="Description",
+                            category_id=10,
+                        )
+                    )
+        finally:
+            auth.CURRENT_USER.reset(token)
+
+        self.assertEqual(caught.exception.status_code, 403)
+        create.assert_not_called()
+
+    def test_agent_can_create_ticket_with_active_non_portal_category(self):
+        self.odoo.categories[10]["show_in_portal"] = False
+
+        result = tickets.create_oca_ticket(
+            OcaTicketCreate(
+                title="Agent ticket",
+                description="Description",
+                category_id=10,
+            )
+        )
+
+        self.assertEqual(result["ticket_id"], 2)
+        self.assertEqual(self.odoo.created_ticket_values["category_id"], 10)
+
     def test_unknown_category_is_rejected_for_new_ticket(self):
         with self.assertRaises(HTTPException) as caught:
             tickets.create_oca_ticket(

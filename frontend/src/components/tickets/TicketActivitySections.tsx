@@ -16,6 +16,7 @@ import type {
 } from '../../types/api'
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024
+const DOWNLOAD_URL_REVOKE_DELAY = 60_000
 const allowedFileTypes: Record<string, string> = {
   pdf: 'application/pdf',
   png: 'image/png',
@@ -29,6 +30,10 @@ const allowedFileTypes: Record<string, string> = {
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
+
+function revokeObjectUrlLater(objectUrl: string) {
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), DOWNLOAD_URL_REVOKE_DELAY)
 }
 
 type SectionResult<T> = { ticketId: number; data?: T; error?: string }
@@ -224,25 +229,29 @@ export function TicketActivitySections({ ticket, user, refreshKey, mainContent, 
     if (downloadRef.current) return
     const token = Symbol('attachment-download')
     const controller = new AbortController()
+    let objectUrl: string | null = null
+    let link: HTMLAnchorElement | null = null
     downloadRef.current = { token, controller }
     setDownloadingId(attachment.id)
     setAttachmentError('')
     try {
       const blob = await apiBlobRequest(`/api/oca/tickets/${ticket.id}/attachments/${attachment.id}/download`, { signal: controller.signal })
       if (!mountedRef.current || downloadRef.current?.token !== token) return
-      const objectUrl = URL.createObjectURL(blob)
-      const link = document.createElement('a')
+      objectUrl = URL.createObjectURL(blob)
+      link = document.createElement('a')
       link.href = objectUrl
       link.download = attachment.name || `attachment-${attachment.id}`
       document.body.appendChild(link)
       link.click()
-      link.remove()
-      URL.revokeObjectURL(objectUrl)
+      revokeObjectUrlLater(objectUrl)
+      objectUrl = null
     } catch (error) {
       if (!controller.signal.aborted && mountedRef.current && downloadRef.current?.token === token) {
         setAttachmentError(writeError(error, '파일을 다운로드하지 못했습니다.'))
       }
     } finally {
+      link?.remove()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
       if (downloadRef.current?.token === token) {
         downloadRef.current = null
         if (mountedRef.current) setDownloadingId(null)
