@@ -4,7 +4,7 @@ import { Link, useNavigate } from 'react-router'
 import { EmptyState, ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
 import { ApiError, apiRequest } from '../services/api'
-import { formatDate } from '../services/format'
+import { formatDate, stageLabel } from '../services/format'
 import type { DashboardResponse } from '../types/api'
 
 const summaryCards = [
@@ -71,7 +71,7 @@ export function DashboardPage() {
           <div className="bar-list">
             {data.by_stage.map((stage) => (
               <div className="bar-row" key={stage.id}>
-                <div className="bar-row__label"><span>{stage.name}</span><strong>{stage.count}</strong></div>
+                <div className="bar-row__label"><span>{stageLabel(stage.name)}</span><strong>{stage.count}</strong></div>
                 <div className="bar-track"><span style={{ width: `${(stage.count / maxStage) * 100}%` }} /></div>
               </div>
             ))}
@@ -96,7 +96,7 @@ export function DashboardPage() {
         {data.recent_tickets.length === 0 ? <EmptyState message="최근 등록된 문의가 없습니다." /> : (
           <div className="table-wrap">
             <table><thead><tr><th>문의 번호</th><th>제목</th><th>상태</th><th>긴급도</th><th>담당자</th><th>등록일</th></tr></thead>
-              <tbody>{data.recent_tickets.map((ticket) => <tr className="clickable-row" key={ticket.id} tabIndex={0} onClick={() => navigate(`/tickets/${ticket.id}`)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') navigate(`/tickets/${ticket.id}`) }}><td className="reference">{ticket.reference || `#${ticket.id}`}</td><td className="title-cell"><Link to={`/tickets/${ticket.id}`} onClick={(event) => event.stopPropagation()}>{ticket.title}</Link></td><td><span className="status-badge">{ticket.status?.name ?? '미지정'}</span></td><td><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span></td><td>{ticket.assignee?.name ?? '미배정'}</td><td>{formatDate(ticket.created_at)}</td></tr>)}</tbody>
+              <tbody>{data.recent_tickets.map((ticket) => <tr className="clickable-row" key={ticket.id} tabIndex={0} onClick={() => navigate(`/tickets/${ticket.id}`)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') navigate(`/tickets/${ticket.id}`) }}><td className="reference">{ticket.reference || `#${ticket.id}`}</td><td className="title-cell"><Link to={`/tickets/${ticket.id}`} onClick={(event) => event.stopPropagation()}>{ticket.title}</Link></td><td><span className="status-badge">{stageLabel(ticket.status?.name)}</span></td><td><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span></td><td>{ticket.assignee?.name ?? '미배정'}</td><td>{formatDate(ticket.created_at)}</td></tr>)}</tbody>
             </table>
           </div>
         )}

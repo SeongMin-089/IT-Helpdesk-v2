@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ArrowLeft, Archive, CircleCheckBig, Pencil, Save } from 'lucide-react'
+import { ArrowLeft, Archive, CircleCheckBig, Pencil, RefreshCcw, Save } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
 import { ApiError, apiRequest } from '../services/api'
-import { formatDate } from '../services/format'
+import { formatDate, stageLabel } from '../services/format'
 import type {
   AssigneeListResponse,
   Relation,
@@ -39,6 +39,16 @@ function updateError(error: unknown) {
   return error.message
 }
 
+function transitionRequestError(error: unknown) {
+  if (!(error instanceof ApiError)) return '문의 상태를 변경하지 못했습니다.'
+  if (error.status === 401) return '로그인 상태를 다시 확인해 주세요.'
+  if (error.status === 403) return '이 상태 변경을 수행할 권한이 없습니다.'
+  if (error.status === 404) return '상태를 변경할 문의를 찾을 수 없습니다.'
+  if (error.status === 409 || error.status === 422) return error.message
+  if (error.status >= 500) return '서버 오류로 상태를 변경하지 못했습니다. 기존 문의 정보는 유지됩니다.'
+  return error.message
+}
+
 export function TicketDetailPage() {
   const { user } = useAuth()
   const { ticketId } = useParams()
@@ -48,6 +58,7 @@ export function TicketDetailPage() {
   const [retryKey, setRetryKey] = useState(0)
   const requestIdRef = useRef(0)
   const mountedRef = useRef(true)
+  const activeTicketIdRef = useRef(numericId)
 
   const [stages, setStages] = useState<Stage[]>([])
   const [stagesLoading, setStagesLoading] = useState(true)
@@ -64,13 +75,21 @@ export function TicketDetailPage() {
   const [editDescription, setEditDescription] = useState('')
   const [originalError, setOriginalError] = useState('')
   const [originalSaving, setOriginalSaving] = useState(false)
-  const originalSavingRef = useRef(false)
+  const originalSavingRef = useRef<symbol | null>(null)
 
   const [managementPriority, setManagementPriority] = useState<string | undefined>()
   const [managementAssigneeId, setManagementAssigneeId] = useState<string | undefined>()
   const [managementError, setManagementError] = useState('')
   const [managementSaving, setManagementSaving] = useState(false)
-  const managementSavingRef = useRef(false)
+  const managementSavingRef = useRef<symbol | null>(null)
+
+  const [transitionMode, setTransitionMode] = useState<'resolve' | 'reprocess' | null>(null)
+  const [resolution, setResolution] = useState('')
+  const [reprocessReason, setReprocessReason] = useState('')
+  const [confirmingClose, setConfirmingClose] = useState(false)
+  const [transitionError, setTransitionError] = useState('')
+  const [transitionSaving, setTransitionSaving] = useState(false)
+  const transitionSavingRef = useRef<symbol | null>(null)
 
   useEffect(() => {
     mountedRef.current = true
@@ -78,6 +97,10 @@ export function TicketDetailPage() {
       mountedRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    activeTicketIdRef.current = numericId
+  }, [numericId])
 
   useEffect(() => {
     if (!validId) return
@@ -94,6 +117,17 @@ export function TicketDetailPage() {
           setManagementPriority(undefined)
           setManagementAssigneeId(undefined)
           setManagementError('')
+          originalSavingRef.current = null
+          managementSavingRef.current = null
+          transitionSavingRef.current = null
+          setOriginalSaving(false)
+          setManagementSaving(false)
+          setTransitionSaving(false)
+          setTransitionMode(null)
+          setResolution('')
+          setReprocessReason('')
+          setConfirmingClose(false)
+          setTransitionError('')
         }
       })
       .catch((caught: unknown) => {
@@ -139,13 +173,17 @@ export function TicketDetailPage() {
     return () => controller.abort()
   }, [assigneesRetryKey, user?.role])
 
-  const editableStageIds = useMemo(
-    () => [...stages]
+  const workflow = useMemo(() => {
+    const sortedStages = [...stages]
       .sort((left, right) => left.sequence - right.sequence || left.id - right.id)
-      .slice(0, 2)
-      .map((stage) => stage.id),
-    [stages],
-  )
+    const valid = sortedStages.length === 5
+      && sortedStages.slice(0, 4).every((stage) => !stage.closed)
+      && sortedStages[4]?.closed === true
+    return {
+      stages: sortedStages,
+      error: valid ? '' : '활성 문의 단계가 5단계 업무 흐름과 일치하지 않습니다.',
+    }
+  }, [stages])
 
   const currentResult = result?.id === numericId ? result : null
   const error = validId ? currentResult?.error : '올바르지 않은 문의 번호입니다.'
@@ -154,13 +192,19 @@ export function TicketDetailPage() {
 
   const { ticket } = currentResult.data
   const isOwner = ticket.requester?.id === user?.partner_id
+  const workflowPosition = workflow.error || !ticket.status
+    ? -1
+    : workflow.stages.findIndex((stage) => stage.id === ticket.status?.id)
+  const workflowStatusError = stagesError
+    || workflow.error
+    || (!stagesLoading && workflowPosition < 0 ? '현재 문의 단계가 5단계 업무 흐름에 포함되지 않습니다.' : '')
+  const workflowReady = !stagesLoading && !workflowStatusError && workflowPosition >= 0
   const canEditOriginal = Boolean(
     isOwner
     && ticket.active
     && !ticket.closed
-    && editableStageIds.length === 2
-    && ticket.status
-    && editableStageIds.includes(ticket.status.id),
+    && workflowReady
+    && (workflowPosition === 0 || workflowPosition === 1),
   )
   const managementReadOnly = !ticket.active || ticket.closed
   const selectedPriority = managementPriority ?? ticket.priority_code
@@ -186,7 +230,7 @@ export function TicketDetailPage() {
 
   const saveOriginal = async (event: FormEvent) => {
     event.preventDefault()
-    if (originalSavingRef.current || managementSavingRef.current) return
+    if (originalSavingRef.current || managementSavingRef.current || transitionSavingRef.current) return
     const normalizedTitle = editTitle.trim()
     const normalizedDescription = editDescription.trim()
     if (!normalizedTitle) {
@@ -210,7 +254,9 @@ export function TicketDetailPage() {
       return
     }
 
-    originalSavingRef.current = true
+    const requestToken = Symbol('original-save')
+    originalSavingRef.current = requestToken
+    const requestTicketId = ticket.id
     setOriginalSaving(true)
     setOriginalError('')
     try {
@@ -218,22 +264,24 @@ export function TicketDetailPage() {
         method: 'PATCH',
         body: JSON.stringify(payload),
       })
-      if (!mountedRef.current) return
+      if (!mountedRef.current || activeTicketIdRef.current !== requestTicketId || originalSavingRef.current !== requestToken) return
       setResult({ id: numericId, data: { success: true, ticket: response.ticket } })
       setEditingOriginal(false)
       setEditTitle('')
       setEditDescription('')
     } catch (caught) {
-      if (mountedRef.current) setOriginalError(updateError(caught))
+      if (mountedRef.current && activeTicketIdRef.current === requestTicketId && originalSavingRef.current === requestToken) setOriginalError(updateError(caught))
     } finally {
-      originalSavingRef.current = false
-      if (mountedRef.current) setOriginalSaving(false)
+      if (originalSavingRef.current === requestToken) {
+        originalSavingRef.current = null
+        if (mountedRef.current && activeTicketIdRef.current === requestTicketId) setOriginalSaving(false)
+      }
     }
   }
 
   const saveManagement = async (event: FormEvent) => {
     event.preventDefault()
-    if (managementSavingRef.current || originalSavingRef.current || managementReadOnly) return
+    if (managementSavingRef.current || originalSavingRef.current || transitionSavingRef.current || managementReadOnly) return
     const nextAssigneeId = selectedAssigneeId ? Number(selectedAssigneeId) : null
     const payload: { priority?: string; assignee_id?: number | null } = {}
     if (selectedPriority !== ticket.priority_code) payload.priority = selectedPriority
@@ -243,7 +291,9 @@ export function TicketDetailPage() {
       return
     }
 
-    managementSavingRef.current = true
+    const requestToken = Symbol('management-save')
+    managementSavingRef.current = requestToken
+    const requestTicketId = ticket.id
     setManagementSaving(true)
     setManagementError('')
     try {
@@ -251,17 +301,98 @@ export function TicketDetailPage() {
         method: 'PATCH',
         body: JSON.stringify(payload),
       })
-      if (!mountedRef.current) return
+      if (!mountedRef.current || activeTicketIdRef.current !== requestTicketId || managementSavingRef.current !== requestToken) return
       setResult({ id: numericId, data: { success: true, ticket: response.ticket } })
       setManagementPriority(undefined)
       setManagementAssigneeId(undefined)
     } catch (caught) {
-      if (mountedRef.current) setManagementError(updateError(caught))
+      if (mountedRef.current && activeTicketIdRef.current === requestTicketId && managementSavingRef.current === requestToken) setManagementError(updateError(caught))
     } finally {
-      managementSavingRef.current = false
-      if (mountedRef.current) setManagementSaving(false)
+      if (managementSavingRef.current === requestToken) {
+        managementSavingRef.current = null
+        if (mountedRef.current && activeTicketIdRef.current === requestTicketId) setManagementSaving(false)
+      }
     }
   }
+
+  const performTransition = async (path: string, body?: Record<string, unknown>) => {
+    if (
+      transitionSavingRef.current
+      || originalSavingRef.current
+      || managementSavingRef.current
+      || !workflowReady
+      || !ticket.active
+      || ticket.closed
+    ) return
+
+    const requestTicketId = ticket.id
+    const requestToken = Symbol('transition-save')
+    transitionSavingRef.current = requestToken
+    setTransitionSaving(true)
+    setTransitionError('')
+    try {
+      const response = await apiRequest<TicketUpdateResponse>(`/api/oca/tickets/${requestTicketId}${path}`, {
+        method: path === '/stage' ? 'PATCH' : 'POST',
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      })
+      if (!mountedRef.current || activeTicketIdRef.current !== requestTicketId || transitionSavingRef.current !== requestToken) return
+      setResult({ id: requestTicketId, data: { success: true, ticket: response.ticket } })
+      setTransitionMode(null)
+      setResolution('')
+      setReprocessReason('')
+      setConfirmingClose(false)
+      setEditingOriginal(false)
+      setEditTitle('')
+      setEditDescription('')
+      setOriginalError('')
+      setManagementPriority(undefined)
+      setManagementAssigneeId(undefined)
+      setManagementError('')
+    } catch (caught) {
+      if (mountedRef.current && activeTicketIdRef.current === requestTicketId && transitionSavingRef.current === requestToken) {
+        setTransitionError(transitionRequestError(caught))
+      }
+    } finally {
+      if (transitionSavingRef.current === requestToken) {
+        transitionSavingRef.current = null
+        if (mountedRef.current && activeTicketIdRef.current === requestTicketId) setTransitionSaving(false)
+      }
+    }
+  }
+
+  const submitResolution = (event: FormEvent) => {
+    event.preventDefault()
+    const normalized = resolution.trim()
+    if (!normalized) {
+      setTransitionError('해결 내용을 입력해 주세요.')
+      return
+    }
+    if (normalized.length > 10000) {
+      setTransitionError('해결 내용은 최대 10,000자까지 입력할 수 있습니다.')
+      return
+    }
+    void performTransition('/resolve', { resolution: normalized })
+  }
+
+  const submitReprocess = (event: FormEvent) => {
+    event.preventDefault()
+    const normalized = reprocessReason.trim()
+    if (!normalized) {
+      setTransitionError('재처리 사유를 입력해 주세요.')
+      return
+    }
+    if (normalized.length > 10000) {
+      setTransitionError('재처리 사유는 최대 10,000자까지 입력할 수 있습니다.')
+      return
+    }
+    void performTransition('/reprocess', { reason: normalized })
+  }
+
+  const transitionControlsDisabled = transitionSaving || originalSaving || managementSaving || editingOriginal
+  const canUseTransitions = workflowReady && ticket.active && !ticket.closed
+  const hasAvailableTransition = (
+    user?.role === 'agent' && workflowPosition >= 0 && workflowPosition <= 2
+  ) || (isOwner && workflowPosition === 3)
 
   return (
     <div className="page-stack">
@@ -270,10 +401,35 @@ export function TicketDetailPage() {
         <Link className="button button--secondary" to="/tickets"><ArrowLeft size={17} />목록으로</Link>
       </header>
 
+      <section className="card workflow-card">
+        <div className="workflow-card__heading"><div><h2>업무 진행 상태</h2><p>현재 상태와 처리 단계를 확인합니다.</p></div><span className="status-badge">{stageLabel(ticket.status?.name)}</span></div>
+        {stagesLoading ? <div className="workflow-message"><span className="spinner" /><p>5단계 업무 흐름을 확인하는 중입니다.</p></div> : workflowStatusError ? (
+          <div className="workflow-error" role="alert"><span>{workflowStatusError}</span><button className="button button--secondary" type="button" onClick={() => { setStagesLoading(true); setStagesError(''); setStagesRetryKey((value) => value + 1) }}><RefreshCcw size={15} />다시 시도</button></div>
+        ) : (
+          <>
+            <ol className="workflow-progress" aria-label="문의 처리 단계">
+              {workflow.stages.map((stage, index) => <li className={index < workflowPosition ? 'is-complete' : index === workflowPosition ? 'is-current' : ''} key={stage.id}><span>{index + 1}</span><strong>{stageLabel(stage.name)}</strong></li>)}
+            </ol>
+
+            {canUseTransitions && hasAvailableTransition && <div className="workflow-actions">
+              {user?.role === 'agent' && workflowPosition === 0 && <button className="button button--primary" type="button" onClick={() => void performTransition('/stage', { stage_id: workflow.stages[1].id })} disabled={transitionControlsDisabled}>{transitionSaving ? '변경 중...' : '배정 단계로 변경'}</button>}
+              {user?.role === 'agent' && workflowPosition === 1 && <button className="button button--primary" type="button" onClick={() => void performTransition('/stage', { stage_id: workflow.stages[2].id })} disabled={transitionControlsDisabled}>{transitionSaving ? '변경 중...' : '처리 시작'}</button>}
+              {user?.role === 'agent' && workflowPosition === 2 && transitionMode !== 'resolve' && <button className="button button--primary" type="button" onClick={() => { setTransitionMode('resolve'); setConfirmingClose(false); setTransitionError('') }} disabled={transitionControlsDisabled}>해결 처리</button>}
+              {isOwner && workflowPosition === 3 && transitionMode !== 'reprocess' && !confirmingClose && <><button className="button button--primary" type="button" onClick={() => { setConfirmingClose(true); setTransitionMode(null); setTransitionError('') }} disabled={transitionControlsDisabled}>문의 종료</button><button className="button button--secondary" type="button" onClick={() => { setTransitionMode('reprocess'); setConfirmingClose(false); setTransitionError('') }} disabled={transitionControlsDisabled}>재처리 요청</button></>}
+
+              {transitionMode === 'resolve' && user?.role === 'agent' && workflowPosition === 2 && <form className="workflow-action-form" onSubmit={submitResolution} noValidate><label className="form-field"><span>해결 내용 <strong>*</strong></span><textarea value={resolution} onChange={(event) => { setResolution(event.target.value); setTransitionError('') }} maxLength={10000} rows={5} disabled={transitionSaving} /><small>{resolution.length.toLocaleString()} / 10,000</small></label><div className="detail-actions"><button className="button button--secondary" type="button" onClick={() => { setTransitionMode(null); setResolution(''); setTransitionError('') }} disabled={transitionSaving}>취소</button><button className="button button--primary" type="submit" disabled={transitionSaving}>{transitionSaving ? '처리 중...' : '해결 저장'}</button></div></form>}
+              {transitionMode === 'reprocess' && isOwner && workflowPosition === 3 && <form className="workflow-action-form" onSubmit={submitReprocess} noValidate><label className="form-field"><span>재처리 사유 <strong>*</strong></span><textarea value={reprocessReason} onChange={(event) => { setReprocessReason(event.target.value); setTransitionError('') }} maxLength={10000} rows={5} disabled={transitionSaving} /><small>{reprocessReason.length.toLocaleString()} / 10,000</small></label><div className="detail-actions"><button className="button button--secondary" type="button" onClick={() => { setTransitionMode(null); setReprocessReason(''); setTransitionError('') }} disabled={transitionSaving}>취소</button><button className="button button--primary" type="submit" disabled={transitionSaving}>{transitionSaving ? '요청 중...' : '재처리 요청'}</button></div></form>}
+              {confirmingClose && isOwner && workflowPosition === 3 && <div className="workflow-confirm" role="alert"><p>문의를 종료하면 추가 상태 변경을 할 수 없습니다. 종료하시겠습니까?</p><div><button className="button button--secondary" type="button" onClick={() => { setConfirmingClose(false); setTransitionError('') }} disabled={transitionSaving}>취소</button><button className="button button--primary" type="button" onClick={() => void performTransition('/close')} disabled={transitionSaving}>{transitionSaving ? '종료 중...' : '종료 확인'}</button></div></div>}
+            </div>}
+            {transitionError && <div className="form-error workflow-action-error" role="alert">{transitionError}</div>}
+          </>
+        )}
+      </section>
+
       <section className="detail-grid">
         <article className="card detail-main">
           <div className="detail-section">
-            <div className="detail-section__heading"><h2>문의 내용</h2>{canEditOriginal && !editingOriginal && <button className="button button--secondary" type="button" onClick={startOriginalEdit} disabled={managementSaving}><Pencil size={16} />수정</button>}</div>
+            <div className="detail-section__heading"><h2>문의 내용</h2>{canEditOriginal && !editingOriginal && <button className="button button--secondary" type="button" onClick={startOriginalEdit} disabled={managementSaving || transitionSaving}><Pencil size={16} />수정</button>}</div>
             {editingOriginal ? (
               <form className="detail-edit-form" onSubmit={saveOriginal} noValidate>
                 <label className="form-field"><span>제목 <strong>*</strong></span><input value={editTitle} onChange={(event) => setEditTitle(event.target.value)} maxLength={200} required disabled={originalSaving} /><small>{editTitle.length} / 200</small></label>
@@ -282,14 +438,12 @@ export function TicketDetailPage() {
                 <div className="detail-actions"><button className="button button--secondary" type="button" onClick={cancelOriginalEdit} disabled={originalSaving}>취소</button><button className="button button--primary" type="submit" disabled={originalSaving}><Save size={16} />{originalSaving ? '저장 중...' : '저장'}</button></div>
               </form>
             ) : <p className="ticket-description">{ticket.description || '등록된 내용이 없습니다.'}</p>}
-            {isOwner && ticket.active && !ticket.closed && stagesError && <div className="detail-load-error" role="alert"><span>{stagesError}</span><button className="button button--secondary" type="button" onClick={() => { setStagesLoading(true); setStagesError(''); setStagesRetryKey((value) => value + 1) }}>단계 다시 확인</button></div>}
-            {isOwner && ticket.active && !ticket.closed && stagesLoading && <p className="detail-helper">수정 가능 단계를 확인하는 중입니다.</p>}
           </div>
         </article>
 
         <div className="detail-side-column">
           <aside className="card detail-sidebar">
-            <div className="detail-badges"><span className="status-badge">{ticket.status?.name ?? '미지정'}</span><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span>{!ticket.active && <span className="state-badge state-badge--archived"><Archive size={13} />보관됨</span>}{ticket.closed && <span className="state-badge state-badge--closed"><CircleCheckBig size={13} />종료됨</span>}</div>
+            <div className="detail-badges"><span className="status-badge">{stageLabel(ticket.status?.name)}</span><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span>{!ticket.active && <span className="state-badge state-badge--archived"><Archive size={13} />보관됨</span>}{ticket.closed && <span className="state-badge state-badge--closed"><CircleCheckBig size={13} />종료됨</span>}</div>
             <dl className="detail-list">
               <div><dt>문의 유형</dt><dd>{ticket.category?.name ?? '-'}</dd></div>
               <div><dt>요청자</dt><dd>{ticket.requester?.name ?? '-'}</dd></div>
@@ -304,12 +458,12 @@ export function TicketDetailPage() {
           {user?.role === 'agent' && <section className="card detail-management">
             <div className="detail-management__heading"><h2>문의 관리</h2><p>{managementReadOnly ? '종료·보관 문의는 변경할 수 없습니다.' : '긴급도와 담당자를 변경합니다.'}</p></div>
             <form className="detail-management__form" onSubmit={saveManagement}>
-              <label className="form-field"><span>긴급도</span><select value={selectedPriority} onChange={(event) => { setManagementPriority(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving}>{priorityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
-              <label className="form-field"><span>담당자</span><select value={selectedAssigneeId} onChange={(event) => { setManagementAssigneeId(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving || assigneesLoading || Boolean(assigneesError)}><option value="">미배정</option>{currentAssigneeMissing && ticket.assignee && <option value={ticket.assignee.id}>{ticket.assignee.name} (현재 담당자)</option>}{assignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label>
+              <label className="form-field"><span>긴급도</span><select value={selectedPriority} onChange={(event) => { setManagementPriority(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving || transitionSaving}>{priorityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+              <label className="form-field"><span>담당자</span><select value={selectedAssigneeId} onChange={(event) => { setManagementAssigneeId(event.target.value); setManagementError('') }} disabled={managementReadOnly || managementSaving || transitionSaving || assigneesLoading || Boolean(assigneesError)}><option value="">미배정</option>{currentAssigneeMissing && ticket.assignee && <option value={ticket.assignee.id}>{ticket.assignee.name} (현재 담당자)</option>}{assignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label>
               {assigneesLoading && <p className="detail-helper">담당자 목록을 불러오는 중입니다.</p>}
               {assigneesError && <div className="detail-load-error" role="alert"><span>{assigneesError}</span><button className="button button--secondary" type="button" onClick={() => { setAssigneesLoading(true); setAssigneesError(''); setAssigneesRetryKey((value) => value + 1) }}>다시 시도</button></div>}
               {managementError && <div className="form-error detail-form-error" role="alert">{managementError}</div>}
-              <button className="button button--primary" type="submit" disabled={managementReadOnly || managementSaving || originalSaving}><Save size={16} />{managementSaving ? '저장 중...' : '관리 정보 저장'}</button>
+              <button className="button button--primary" type="submit" disabled={managementReadOnly || managementSaving || originalSaving || transitionSaving}><Save size={16} />{managementSaving ? '저장 중...' : '관리 정보 저장'}</button>
             </form>
           </section>}
         </div>

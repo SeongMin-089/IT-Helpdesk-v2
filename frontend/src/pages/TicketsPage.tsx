@@ -4,7 +4,7 @@ import { Link, useNavigate } from 'react-router'
 import { EmptyState, ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
 import { ApiError, apiRequest, toQuery } from '../services/api'
-import { formatDate } from '../services/format'
+import { formatDate, stageLabel } from '../services/format'
 import type { Stage, StageListResponse, TicketListResponse } from '../types/api'
 
 const priorityOptions = [
@@ -95,7 +95,7 @@ export function TicketsPage({ assignedOnly = false }: { assignedOnly?: boolean }
 
       <section className="card filter-card" aria-label="문의 검색 필터">
         <label className="search-box"><Search size={18} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="문의 번호, 제목, 내용 검색" aria-label="문의 검색" /></label>
-        <div className="filter-select"><Filter size={17} /><select value={stageId} onChange={(event) => { setLoading(true); setError(''); setPage(1); setStageId(event.target.value) }} aria-label="상태 필터" disabled={stagesLoading || Boolean(stagesError)}><option value="">{stagesLoading ? '상태 불러오는 중' : stagesError ? '상태 로딩 실패' : '전체 상태'}</option>{stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></div>
+        <div className="filter-select"><Filter size={17} /><select value={stageId} onChange={(event) => { setLoading(true); setError(''); setPage(1); setStageId(event.target.value) }} aria-label="상태 필터" disabled={stagesLoading || Boolean(stagesError)}><option value="">{stagesLoading ? '상태 불러오는 중' : stagesError ? '상태 로딩 실패' : '전체 상태'}</option>{stages.map((stage) => <option key={stage.id} value={stage.id}>{stageLabel(stage.name)}</option>)}</select></div>
         <div className="filter-select"><select value={priority} onChange={(event) => { setLoading(true); setError(''); setPage(1); setPriority(event.target.value) }} aria-label="긴급도 필터">{priorityOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></div>
       </section>
 
@@ -106,7 +106,7 @@ export function TicketsPage({ assignedOnly = false }: { assignedOnly?: boolean }
           <>
             <div className="table-wrap">
               <table><thead><tr><th>문의 번호</th><th>제목</th><th>유형</th><th>요청자</th><th>담당자</th><th>상태</th><th>긴급도</th><th>등록일</th></tr></thead>
-                <tbody>{data.tickets.map((ticket) => <tr className="clickable-row" key={ticket.id} tabIndex={0} onClick={() => navigate(`/tickets/${ticket.id}`)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') navigate(`/tickets/${ticket.id}`) }}><td className="reference">{ticket.reference || `#${ticket.id}`}</td><td className="title-cell"><Link to={`/tickets/${ticket.id}`} onClick={(event) => event.stopPropagation()}><strong>{ticket.title}</strong></Link><span>{ticket.description || '내용 없음'}</span></td><td>{ticket.category?.name ?? '-'}</td><td>{ticket.requester?.name ?? '-'}</td><td>{ticket.assignee?.name ?? <span className="muted">미배정</span>}</td><td><span className="status-badge">{ticket.status?.name ?? '미지정'}</span></td><td><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span></td><td>{formatDate(ticket.created_at)}</td></tr>)}</tbody>
+                <tbody>{data.tickets.map((ticket) => <tr className="clickable-row" key={ticket.id} tabIndex={0} onClick={() => navigate(`/tickets/${ticket.id}`)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') navigate(`/tickets/${ticket.id}`) }}><td className="reference">{ticket.reference || `#${ticket.id}`}</td><td className="title-cell"><Link to={`/tickets/${ticket.id}`} onClick={(event) => event.stopPropagation()}><strong>{ticket.title}</strong></Link><span>{ticket.description || '내용 없음'}</span></td><td>{ticket.category?.name ?? '-'}</td><td>{ticket.requester?.name ?? '-'}</td><td>{ticket.assignee?.name ?? <span className="muted">미배정</span>}</td><td><span className="status-badge">{stageLabel(ticket.status?.name)}</span></td><td><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span></td><td>{formatDate(ticket.created_at)}</td></tr>)}</tbody>
               </table>
             </div>
             <div className="pagination"><span>{data.total_pages === 0 ? 0 : data.page} / {data.total_pages} 페이지</span><div><button className="icon-button" type="button" onClick={() => { setLoading(true); setError(''); setPage((value) => Math.max(1, value - 1)) }} disabled={data.page <= 1} aria-label="이전 페이지"><ChevronLeft size={19} /></button><button className="icon-button" type="button" onClick={() => { setLoading(true); setError(''); setPage((value) => value + 1) }} disabled={!data.has_next} aria-label="다음 페이지"><ChevronRight size={19} /></button></div></div>
