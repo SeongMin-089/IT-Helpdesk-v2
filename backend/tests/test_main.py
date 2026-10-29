@@ -203,6 +203,14 @@ class MemoryOdoo:
                 "show_in_portal": True,
             },
         }
+        self.teams = {
+            3: {"id": 3, "name": "IT", "complete_name": "IT", "active": True},
+            4: {"id": 4, "name": "Old", "complete_name": "Old", "active": False},
+        }
+        self.ticket_tags = {
+            88: {"id": 88, "name": "Network", "active": True},
+            89: {"id": 89, "name": "Inactive", "active": False},
+        }
         self.document_pages = {
             100: {
                 "id": 100,
@@ -432,6 +440,18 @@ class MemoryOdoo:
                 records = [record for record in records if record["active"]]
             records = [record for record in records if self._matches(record, domain)]
             return self._select_fields(records, fields, limit, offset)
+        if model == "helpdesk.ticket.team":
+            records = list(self.teams.values())
+            if not (context or {}).get("active_test") is False:
+                records = [record for record in records if record["active"]]
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit, offset)
+        if model == "helpdesk.ticket.tag":
+            records = list(self.ticket_tags.values())
+            if not (context or {}).get("active_test") is False:
+                records = [record for record in records if record["active"]]
+            records = [record for record in records if self._matches(record, domain)]
+            return self._select_fields(records, fields, limit, offset)
         if model == "helpdesk.ticket.stage":
             records = list(self.stages.values())
             if not (context or {}).get("active_test") is False:
@@ -494,7 +514,14 @@ class MemoryOdoo:
             )
         )
 
-    def formatted_read_group(self, model, groupby, aggregates, domain=None):
+    def formatted_read_group(
+        self,
+        model,
+        groupby,
+        aggregates,
+        domain=None,
+        context=None,
+    ):
         if model != "helpdesk.ticket" or aggregates != ["__count"]:
             raise AssertionError("Unexpected grouped read")
         field = groupby[0]
@@ -992,11 +1019,17 @@ class OcaTicketApiTests(unittest.TestCase):
             odoo, "message_post", side_effect=self.odoo.message_post
         )
         self.create_patch = patch.object(odoo, "create", side_effect=self.odoo.create)
+        self.group_patch = patch.object(
+            odoo,
+            "formatted_read_group",
+            side_effect=self.odoo.formatted_read_group,
+        )
         self.search_mock = self.search_patch.start()
         self.count_mock = self.count_patch.start()
         self.write_mock = self.write_patch.start()
         self.message_mock = self.message_patch.start()
         self.create_mock = self.create_patch.start()
+        self.group_mock = self.group_patch.start()
 
     def tearDown(self):
         patch.stopall()
@@ -1152,6 +1185,30 @@ class OcaTicketApiTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 422)
         self.search_mock.assert_not_called()
         self.count_mock.assert_not_called()
+
+    def test_ticket_filter_options_are_agent_only_and_use_active_odoo_records(self):
+        self.odoo.tickets[1]["tag_ids"] = [88]
+
+        result = tickets.get_oca_ticket_filter_options()
+
+        self.assertEqual(result["requesters"], [{"id": 9, "name": "Requester Lee"}])
+        self.assertEqual(result["teams"], [{"id": 3, "name": "IT"}])
+        self.assertEqual(result["tags"], [{"id": 88, "name": "Network"}])
+        self.group_mock.assert_called_once_with(
+            model="helpdesk.ticket",
+            groupby=["partner_id"],
+            aggregates=["__count"],
+            domain=[["partner_id", "!=", False]],
+            context={"active_test": False},
+        )
+
+        token = self.set_user(TEST_EMPLOYEE_A)
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                tickets.get_oca_ticket_filter_options()
+        finally:
+            auth.CURRENT_USER.reset(token)
+        self.assertEqual(caught.exception.status_code, 403)
 
     def test_ticket_pagination_returns_total_and_page_metadata(self):
         for ticket_id in (2, 3):
@@ -2192,6 +2249,8 @@ class FaqApiTests(unittest.TestCase):
             auth.CURRENT_USER.reset(token)
 
     def test_suggestions_search_title_content_and_tag_and_limit_results(self):
+        self.odoo.document_pages[111]["name"] = "Network private draft"
+        self.odoo.document_pages[112]["name"] = "Network archived FAQ"
         self.odoo.document_pages[113] = {
             **copy.deepcopy(self.odoo.document_pages[110]),
             "id": 113,
@@ -2216,6 +2275,26 @@ class FaqApiTests(unittest.TestCase):
         self.assertEqual(result["count"], 3)
         self.assertEqual(len(result["faqs"]), 3)
         self.assertEqual(result["faqs"][0]["id"], 115)
+        self.assertNotIn(111, [faq["id"] for faq in result["faqs"]])
+        self.assertNotIn(112, [faq["id"] for faq in result["faqs"]])
+
+    def test_faq_tag_list_is_agent_only_and_returns_active_tags(self):
+        self.odoo.document_tags[203] = {
+            "id": 203,
+            "name": "inactive",
+            "active": False,
+        }
+
+        result = faqs.get_faq_tags()
+
+        self.assertEqual([tag["id"] for tag in result["tags"]], [201, 202])
+        token = auth.CURRENT_USER.set(TEST_EMPLOYEE_A)
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                faqs.get_faq_tags()
+        finally:
+            auth.CURRENT_USER.reset(token)
+        self.assertEqual(caught.exception.status_code, 403)
 
     def test_admin_create_update_publish_archive_restore_and_unpublish(self):
         created = faqs.create_faq(
@@ -2230,6 +2309,12 @@ class FaqApiTests(unittest.TestCase):
         )["faq"]
         self.assertEqual(updated["content"], "Power cycle")
         self.assertEqual(updated["tags"][0]["name"], "network")
+        cleared = faqs.update_faq(
+            faq_id,
+            OcaFaqUpdate(tag_ids=[]),
+        )["faq"]
+        self.assertEqual(cleared["tags"], [])
+        self.assertEqual(self.odoo.document_pages[faq_id]["tag_ids"], [])
         self.assertGreaterEqual(len(self.odoo.document_histories), 2)
 
         self.assertEqual(faqs.publish_faq(faq_id)["faq"]["visibility"], "public")
@@ -2241,6 +2326,22 @@ class FaqApiTests(unittest.TestCase):
         )
         all_faqs = faqs.get_all_faqs()
         self.assertEqual(all_faqs["count"], 4)
+
+    def test_tag_change_replaces_existing_inactive_tags_with_active_selection(self):
+        self.odoo.document_tags[203] = {
+            "id": 203,
+            "name": "inactive",
+            "active": False,
+        }
+        self.odoo.document_pages[110]["tag_ids"] = [203]
+
+        updated = faqs.update_faq(
+            110,
+            OcaFaqUpdate(tag_ids=[201]),
+        )["faq"]
+
+        self.assertEqual(self.odoo.document_pages[110]["tag_ids"], [201])
+        self.assertEqual(updated["tags"], [{"id": 201, "name": "network"}])
 
     def test_update_rejects_null_only_payload_without_odoo_write(self):
         with patch.object(odoo, "write") as write_mock:
@@ -2284,6 +2385,17 @@ class FaqApiTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as caught:
             faqs.create_faq(
                 OcaFaqCreate(name="Bad tag", content="Text", tag_ids=[999])
+            )
+        self.assertEqual(caught.exception.status_code, 422)
+
+        self.odoo.document_tags[203] = {
+            "id": 203,
+            "name": "inactive",
+            "active": False,
+        }
+        with self.assertRaises(HTTPException) as caught:
+            faqs.create_faq(
+                OcaFaqCreate(name="Inactive tag", content="Text", tag_ids=[203])
             )
         self.assertEqual(caught.exception.status_code, 422)
 
@@ -2879,6 +2991,27 @@ class OdooJson2Tests(unittest.TestCase):
                 "groupby": ["priority"],
                 "aggregates": ["__count"],
             },
+        )
+
+    def test_formatted_read_group_sends_optional_context(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = []
+
+        with (
+            patch.object(config, "ODOO_API_KEY", "test-key"),
+            patch.object(odoo.requests, "post", return_value=response) as post,
+        ):
+            odoo.formatted_read_group(
+                "helpdesk.ticket",
+                groupby=["partner_id"],
+                aggregates=["__count"],
+                context={"active_test": False},
+            )
+
+        self.assertEqual(
+            post.call_args.kwargs["json"]["context"],
+            {"active_test": False},
         )
 
     def test_search_read_preserves_odoo_access_denied_status(self):

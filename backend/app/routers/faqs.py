@@ -274,6 +274,19 @@ def get_all_faqs():
     return {"success": True, "count": len(faqs), "faqs": faqs}
 
 
+@router.get("/admin/tags")
+def get_faq_tags():
+    auth.require_agent()
+    tags = odoo.search_read(
+        model="document.page.tag",
+        fields=["id", "name"],
+        domain=[["active", "=", True]],
+        limit=1000,
+        order="name asc, id asc",
+    )
+    return {"success": True, "count": len(tags), "tags": tags}
+
+
 @router.post("/drafts", status_code=201)
 def create_faq(data: OcaFaqCreate):
     faq = create_faq_draft(data.name, data.content, data.tag_ids)

@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router'
 import { EmptyState, ErrorState, PageLoader } from '../components/common/PageState'
 import { ApiError, apiRequest } from '../services/api'
 import { formatDate } from '../services/format'
-import type { Faq, FaqListResponse, FaqMutationResponse } from '../types/api'
+import type { Faq, FaqListResponse, FaqMutationResponse, FaqTag, FaqTagListResponse } from '../types/api'
 
 type FaqAction = 'publish' | 'unpublish' | 'archive' | 'restore'
 type EditorTarget = { type: 'new' } | { type: 'faq'; faq: Faq }
@@ -32,6 +32,12 @@ function faqState(faq: Faq) {
     : { key: 'draft', label: '비공개 초안' }
 }
 
+function sameTagIds(left: number[], right: number[]) {
+  if (left.length !== right.length) return false
+  const rightIds = new Set(right)
+  return left.every((tagId) => rightIds.has(tagId))
+}
+
 export function FaqAdminPage() {
   const [searchParams] = useSearchParams()
   const requestedFaqId = Number(searchParams.get('faq'))
@@ -43,14 +49,22 @@ export function FaqAdminPage() {
   const [editingId, setEditingId] = useState<number | null>(null)
   const [name, setName] = useState('')
   const [content, setContent] = useState('')
+  const [tags, setTags] = useState<FaqTag[]>([])
+  const [tagsLoaded, setTagsLoaded] = useState(false)
+  const [tagsLoading, setTagsLoading] = useState(true)
+  const [tagsError, setTagsError] = useState('')
+  const [tagsRetryKey, setTagsRetryKey] = useState(0)
+  const [selectedTagIds, setSelectedTagIds] = useState<number[]>([])
   const [originalName, setOriginalName] = useState('')
   const [originalContent, setOriginalContent] = useState('')
+  const [originalTagIds, setOriginalTagIds] = useState<number[]>([])
   const [formError, setFormError] = useState('')
   const [saving, setSaving] = useState(false)
   const [pendingAction, setPendingAction] = useState<{ faq: Faq; action: FaqAction } | null>(null)
   const [pendingEditorTarget, setPendingEditorTarget] = useState<EditorTarget | null>(null)
   const [actionError, setActionError] = useState('')
   const requestIdRef = useRef(0)
+  const tagRequestIdRef = useRef(0)
   const writeLockRef = useRef<symbol | null>(null)
   const mountedRef = useRef(true)
   const editingIdRef = useRef<number | null>(null)
@@ -71,12 +85,15 @@ export function FaqAdminPage() {
         setFaqs(response.faqs)
         const initial = response.faqs.find((faq) => faq.id === requestedFaqId) ?? response.faqs[0]
         if (initial) {
+          const initialTagIds = initial.tags.map((tag) => tag.id)
           editingIdRef.current = initial.id
           setEditingId(initial.id)
           setName(initial.name)
           setContent(initial.content)
           setOriginalName(initial.name)
           setOriginalContent(initial.content)
+          setSelectedTagIds(initialTagIds)
+          setOriginalTagIds(initialTagIds)
         }
       })
       .catch((caught: unknown) => {
@@ -92,14 +109,48 @@ export function FaqAdminPage() {
     }
   }, [requestedFaqId, retryKey])
 
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++tagRequestIdRef.current
+    void apiRequest<FaqTagListResponse>('/api/oca/faqs/admin/tags', { signal: controller.signal })
+      .then((response) => {
+        if (controller.signal.aborted || requestId !== tagRequestIdRef.current) return
+        setTags(response.tags)
+        setTagsLoaded(true)
+        setTagsError('')
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted || requestId !== tagRequestIdRef.current) return
+        setTagsLoaded(false)
+        setTagsError(adminError(caught, 'FAQ 태그 목록을 불러오지 못했습니다.'))
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === tagRequestIdRef.current) setTagsLoading(false)
+      })
+    return () => {
+      controller.abort()
+      tagRequestIdRef.current += 1
+    }
+  }, [tagsRetryKey])
+
   const filteredFaqs = useMemo(() => faqs.filter((faq) => {
     if (filter === 'all') return true
     return faqState(faq).key === filter
   }), [faqs, filter])
   const selectedFaq = editingId === null ? null : faqs.find((faq) => faq.id === editingId) ?? null
+  const activeTagIds = useMemo(() => new Set(tags.map((tag) => tag.id)), [tags])
+  const editorTags = useMemo(() => {
+    const tagsById = new Map(tags.map((tag) => [tag.id, tag]))
+    selectedFaq?.tags.forEach((tag) => tagsById.set(tag.id, tag))
+    return [...tagsById.values()]
+  }, [selectedFaq, tags])
+  const inactiveExistingTags = useMemo(
+    () => selectedFaq?.tags.filter((tag) => !activeTagIds.has(tag.id)) ?? [],
+    [activeTagIds, selectedFaq],
+  )
   const hasUnsavedChanges = editingId === null
-    ? Boolean(name.trim() || content.trim())
-    : name.trim() !== originalName || content.trim() !== originalContent
+    ? Boolean(name.trim() || content.trim() || (tagsLoaded && selectedTagIds.length))
+    : name.trim() !== originalName || content.trim() !== originalContent || (tagsLoaded && !sameTagIds(selectedTagIds, originalTagIds))
 
   const applyEditorTarget = (target: EditorTarget) => {
     const faq = target.type === 'faq' ? target.faq : null
@@ -109,6 +160,9 @@ export function FaqAdminPage() {
     setContent(faq?.content ?? '')
     setOriginalName(faq?.name ?? '')
     setOriginalContent(faq?.content ?? '')
+    const nextTagIds = faq?.tags.map((tag) => tag.id) ?? []
+    setSelectedTagIds(nextTagIds)
+    setOriginalTagIds(nextTagIds)
     setFormError('')
     setActionError('')
     setPendingAction(null)
@@ -151,9 +205,11 @@ export function FaqAdminPage() {
       return
     }
     const targetId = editingId
-    const payload: { name?: string; content?: string } = {}
+    const payload: { name?: string; content?: string; tag_ids?: number[] } = {}
     if (targetId === null || normalizedName !== originalName) payload.name = normalizedName
     if (targetId === null || normalizedContent !== originalContent) payload.content = normalizedContent
+    const tagsChanged = tagsLoaded && (targetId === null || !sameTagIds(selectedTagIds, originalTagIds))
+    if (tagsChanged) payload.tag_ids = selectedTagIds.filter((tagId) => activeTagIds.has(tagId))
     if (Object.keys(payload).length === 0) {
       setFormError('변경된 내용이 없습니다.')
       return
@@ -176,6 +232,9 @@ export function FaqAdminPage() {
         setContent(response.faq.content)
         setOriginalName(response.faq.name)
         setOriginalContent(response.faq.content)
+        const savedTagIds = response.faq.tags.map((tag) => tag.id)
+        setSelectedTagIds(savedTagIds)
+        setOriginalTagIds(savedTagIds)
       }
     } catch (caught) {
       if (mountedRef.current && writeLockRef.current === token) setFormError(adminError(caught, 'FAQ를 저장하지 못했습니다.'))
@@ -204,6 +263,9 @@ export function FaqAdminPage() {
         setContent(response.faq.content)
         setOriginalName(response.faq.name)
         setOriginalContent(response.faq.content)
+        const savedTagIds = response.faq.tags.map((tag) => tag.id)
+        setSelectedTagIds(savedTagIds)
+        setOriginalTagIds(savedTagIds)
       }
     } catch (caught) {
       if (mountedRef.current && writeLockRef.current === token) setActionError(adminError(caught, `FAQ를 ${actionLabels[action]}하지 못했습니다.`))
@@ -229,12 +291,13 @@ export function FaqAdminPage() {
       </aside>
 
       <article className="card faq-editor">
-        <div className="faq-editor__heading"><div><h2>{editingId === null ? '새 FAQ 초안' : 'FAQ 편집'}</h2><p>{editingId === null ? '비공개 초안으로 생성됩니다.' : '기존 태그는 표시만 하며 변경하지 않습니다.'}</p></div>{selectedFaq?.active && selectedFaq.visibility === 'public' && <Link className="button button--secondary" to={`/faqs/${selectedFaq.id}`}><Eye size={15} />공개 화면</Link>}</div>
+        <div className="faq-editor__heading"><div><h2>{editingId === null ? '새 FAQ 초안' : 'FAQ 편집'}</h2><p>{editingId === null ? '비공개 초안으로 생성됩니다.' : '제목, 내용과 태그를 검토하고 저장합니다.'}</p></div>{selectedFaq?.active && selectedFaq.visibility === 'public' && <Link className="button button--secondary" to={`/faqs/${selectedFaq.id}`}><Eye size={15} />공개 화면</Link>}</div>
         {selectedFaq && <div className="faq-editor__meta"><span className={`faq-state faq-state--${faqState(selectedFaq).key}`}>{faqState(selectedFaq).label}</span>{selectedFaq.tags.length > 0 && <div className="faq-tags"><Tags size={13} />{selectedFaq.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div>}</div>}
         {pendingEditorTarget && <div className="workflow-confirm faq-confirm faq-switch-confirm" role="alert"><p>저장하지 않은 편집 내용이 있습니다. 변경사항을 버리고 {pendingEditorTarget.type === 'new' ? '새 FAQ 초안을 작성' : `“${pendingEditorTarget.faq.name}” FAQ로 이동`}하시겠습니까?</p><div><button className="button button--secondary" type="button" onClick={() => setPendingEditorTarget(null)}>취소</button><button className="button button--primary" type="button" onClick={() => { const target = pendingEditorTarget; setPendingEditorTarget(null); applyEditorTarget(target) }}>변경사항 버리기</button></div></div>}
         <form className="faq-editor__form" onSubmit={saveFaq} noValidate>
           <label className="form-field"><span>제목 <strong>*</strong></span><input value={name} onChange={(event) => { setName(event.target.value); setFormError('') }} maxLength={200} disabled={saving || Boolean(pendingAction) || Boolean(pendingEditorTarget)} /><small>{name.length} / 200</small></label>
           <label className="form-field"><span>내용 <strong>*</strong></span><textarea value={content} onChange={(event) => { setContent(event.target.value); setFormError('') }} maxLength={20000} rows={14} disabled={saving || Boolean(pendingAction) || Boolean(pendingEditorTarget)} /><small>{content.length.toLocaleString()} / 20,000</small></label>
+          {tagsLoading ? <div className="faq-tag-load-state">FAQ 태그를 불러오는 중입니다.</div> : tagsError ? <div className="detail-load-error" role="alert"><span>{tagsError}</span><span>{editingId === null ? '태그 없이 FAQ 초안을 생성할 수 있습니다.' : '기존 FAQ 태그는 변경하지 않고 제목과 내용만 저장할 수 있습니다.'}</span><button className="button button--secondary" type="button" onClick={() => { setTagsLoading(true); setTagsError(''); setTagsRetryKey((value) => value + 1) }}>태그 다시 시도</button></div> : <fieldset className="faq-tag-selector" disabled={saving || Boolean(pendingAction) || Boolean(pendingEditorTarget)}><legend>태그</legend>{editorTags.length === 0 ? <p>선택할 수 있는 활성 태그가 없습니다.</p> : <div>{editorTags.map((tag) => { const active = activeTagIds.has(tag.id); const checked = selectedTagIds.includes(tag.id); return <label key={tag.id}><input type="checkbox" checked={checked} disabled={!active && !checked} onChange={(event) => { const nextChecked = event.target.checked; setSelectedTagIds((current) => nextChecked ? [...current, tag.id] : current.filter((tagId) => tagId !== tag.id)); setFormError('') }} /><span>{tag.name}{!active ? ' (비활성)' : ''}</span></label> })}</div>}{inactiveExistingTags.length > 0 && <p className="faq-tag-selector__notice">비활성 태그는 기존 상태로 표시됩니다. 태그 구성을 변경해 저장하면 비활성 태그는 제거됩니다.</p>}</fieldset>}
           {formError && <div className="form-error detail-form-error" role="alert">{formError}</div>}
           <div className="faq-editor__actions"><button className="button button--primary" type="submit" disabled={saving || Boolean(pendingAction) || Boolean(pendingEditorTarget)}><Save size={16} />{saving ? '처리 중...' : editingId === null ? '초안 생성' : '변경 저장'}</button></div>
         </form>

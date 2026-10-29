@@ -336,6 +336,56 @@ def get_oca_tickets(
     )
 
 
+@router.get("/filter-options")
+def get_oca_ticket_filter_options():
+    auth.require_agent()
+    requester_groups = odoo.formatted_read_group(
+        model="helpdesk.ticket",
+        groupby=["partner_id"],
+        aggregates=["__count"],
+        domain=[["partner_id", "!=", False]],
+        context={"active_test": False},
+    )
+    requesters_by_id = {}
+    for group in requester_groups:
+        requester = oca_relation(group.get("partner_id"))
+        if requester:
+            requesters_by_id[requester["id"]] = requester
+
+    team_records = odoo.search_read(
+        model="helpdesk.ticket.team",
+        fields=["id", "name", "complete_name"],
+        domain=[["active", "=", True]],
+        limit=100,
+        order="sequence asc, id asc",
+    )
+    tag_records = odoo.search_read(
+        model="helpdesk.ticket.tag",
+        fields=["id", "name"],
+        domain=[["active", "=", True]],
+        limit=100,
+        order="sequence asc, id asc",
+    )
+    return {
+        "success": True,
+        "requesters": sorted(
+            requesters_by_id.values(),
+            key=lambda item: (item["name"].casefold(), item["id"]),
+        ),
+        "teams": [
+            {
+                "id": record["id"],
+                "name": record.get("complete_name") or record.get("name") or "",
+            }
+            for record in team_records
+        ],
+        "tags": [
+            {"id": record["id"], "name": record.get("name") or ""}
+            for record in tag_records
+        ],
+    }
+
+
 @router.get("/{ticket_id}")
 def get_oca_ticket_detail(ticket_id: int):
     if ticket_id <= 0:

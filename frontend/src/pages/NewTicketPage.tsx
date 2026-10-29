@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ArrowLeft, Send } from 'lucide-react'
-import { useNavigate } from 'react-router'
+import { ArrowLeft, BookOpenText, Send } from 'lucide-react'
+import { Link, useNavigate } from 'react-router'
 import { ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
 import { ApiError, apiRequest } from '../services/api'
 import type {
+  Faq,
+  FaqListResponse,
   TicketCategoryListResponse,
   TicketCreateResponse,
 } from '../types/api'
@@ -29,8 +31,12 @@ export function NewTicketPage() {
   const [categoryRetryKey, setCategoryRetryKey] = useState(0)
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
+  const [suggestions, setSuggestions] = useState<Faq[]>([])
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
+  const [suggestionError, setSuggestionError] = useState('')
   const submittingRef = useRef(false)
   const mountedRef = useRef(true)
+  const suggestionRequestIdRef = useRef(0)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -54,6 +60,34 @@ export function NewTicketPage() {
       mountedRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    const query = title.trim()
+    const requestId = ++suggestionRequestIdRef.current
+    if (query.length < 2) return
+
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      void apiRequest<FaqListResponse>(`/api/oca/faqs/suggestions?${new URLSearchParams({ q: query })}`, { signal: controller.signal })
+        .then((response) => {
+          if (controller.signal.aborted || requestId !== suggestionRequestIdRef.current) return
+          setSuggestions(response.faqs.slice(0, 3))
+        })
+        .catch(() => {
+          if (controller.signal.aborted || requestId !== suggestionRequestIdRef.current) return
+          setSuggestionError('FAQ 추천을 불러오지 못했습니다. 문의 등록은 계속할 수 있습니다.')
+        })
+        .finally(() => {
+          if (!controller.signal.aborted && requestId === suggestionRequestIdRef.current) setSuggestionsLoading(false)
+        })
+    }, 400)
+
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+      if (requestId === suggestionRequestIdRef.current) suggestionRequestIdRef.current += 1
+    }
+  }, [title])
 
   const categories = useMemo(
     () => categoryData?.categories.filter((category) =>
@@ -119,7 +153,8 @@ export function NewTicketPage() {
         <form className="card ticket-form" onSubmit={handleSubmit} noValidate>
           <div className="ticket-form__intro"><h2>문의 내용</h2><p>필수 항목을 모두 입력해 주세요.</p></div>
           <div className="ticket-form__fields">
-            <label className="form-field"><span>제목 <strong>*</strong></span><input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} required disabled={submitting} placeholder="문의 제목을 입력하세요" /><small>{title.length} / 200</small></label>
+            <label className="form-field"><span>제목 <strong>*</strong></span><input value={title} onChange={(event) => { const nextTitle = event.target.value; setTitle(nextTitle); setSuggestions([]); setSuggestionError(''); setSuggestionsLoading(nextTitle.trim().length >= 2) }} maxLength={200} required disabled={submitting} placeholder="문의 제목을 입력하세요" /><small>{title.length} / 200</small></label>
+            {title.trim().length >= 2 && <section className="faq-suggestions" aria-label="제목 기반 FAQ 추천"><div className="faq-suggestions__heading"><BookOpenText size={17} /><div><strong>관련 FAQ</strong><span>입력한 제목과 관련된 공개 FAQ를 추천합니다.</span></div></div>{suggestionsLoading ? <p>FAQ를 찾는 중입니다.</p> : suggestionError ? <p className="faq-suggestions__error">{suggestionError}</p> : suggestions.length === 0 ? <p>관련 FAQ를 찾지 못했습니다.</p> : <div className="faq-suggestions__list">{suggestions.map((faq) => <Link to={`/faqs/${faq.id}`} target="_blank" rel="noreferrer" key={faq.id}><strong>{faq.name}</strong><span>{faq.content || '내용 없음'}</span><small>상세 보기</small></Link>)}</div>}</section>}
             <label className="form-field"><span>내용 <strong>*</strong></span><textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={10000} required disabled={submitting} placeholder="문제 상황과 필요한 지원 내용을 입력하세요" rows={10} /><small>{description.length.toLocaleString()} / 10,000</small></label>
             <div className="ticket-form__row">
               <label className="form-field"><span>문의 유형 <strong>*</strong></span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} required disabled={submitting}><option value="">문의 유형 선택</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.complete_name || category.name}</option>)}</select></label>

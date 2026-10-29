@@ -202,13 +202,15 @@ def search_count(model, domain=None, context=None):
         raise HTTPException(status_code=502, detail="Cannot connect to Odoo")
 
 
-def formatted_read_group(model, groupby, aggregates, domain=None):
+def formatted_read_group(model, groupby, aggregates, domain=None, context=None):
     _ensure_api_key()
     payload = {
         "domain": domain if domain is not None else [],
         "groupby": groupby,
         "aggregates": aggregates,
     }
+    if context is not None:
+        payload["context"] = context
 
     try:
         response = requests.post(

@@ -150,6 +150,12 @@ export interface FaqListResponse {
   faqs: Faq[]
 }
 
+export interface FaqTagListResponse {
+  success: boolean
+  count: number
+  tags: FaqTag[]
+}
+
 export interface FaqDetailResponse {
   success: boolean
   faq: Faq
@@ -167,6 +173,13 @@ export interface AssigneeListResponse {
   success: boolean
   count: number
   assignees: Relation[]
+}
+
+export interface TicketFilterOptionsResponse {
+  success: boolean
+  requesters: Relation[]
+  teams: Relation[]
+  tags: Relation[]
 }
 
 export interface TicketCategory {
