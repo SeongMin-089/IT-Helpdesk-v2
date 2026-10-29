@@ -8,6 +8,25 @@ export class ApiError extends Error {
   }
 }
 
+type UnauthorizedHandler = () => Promise<void>
+
+let unauthorizedHandler: UnauthorizedHandler | null = null
+let sessionCheck: Promise<void> | null = null
+
+export function setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
+  unauthorizedHandler = handler
+}
+
+async function verifySessionAfterUnauthorized() {
+  if (!unauthorizedHandler) return
+  if (!sessionCheck) {
+    sessionCheck = unauthorizedHandler().finally(() => {
+      sessionCheck = null
+    })
+  }
+  await sessionCheck
+}
+
 function errorMessage(payload: unknown, fallback: string) {
   if (!payload || typeof payload !== 'object' || !('detail' in payload)) {
     return fallback
@@ -45,7 +64,11 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}) {
           : response.status === 422
             ? '입력한 내용을 확인해 주세요.'
             : '요청을 처리하지 못했습니다.'
-    throw new ApiError(response.status, errorMessage(payload, fallback))
+    const error = new ApiError(response.status, errorMessage(payload, fallback))
+    if (response.status === 401 && !path.startsWith('/api/auth/')) {
+      await verifySessionAfterUnauthorized()
+    }
+    throw error
   }
   return payload as T
 }

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { CircleCheckBig, CircleDot, Inbox, TicketCheck } from 'lucide-react'
+import { Link, useNavigate } from 'react-router'
 import { EmptyState, ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
 import { ApiError, apiRequest } from '../services/api'
@@ -14,28 +15,36 @@ const summaryCards = [
 ] as const
 
 export function DashboardPage() {
-  const { clearSession, user } = useAuth()
+  const { user } = useAuth()
+  const navigate = useNavigate()
   const [data, setData] = useState<DashboardResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [retryKey, setRetryKey] = useState(0)
+  const requestIdRef = useRef(0)
 
-  const loadDashboard = useCallback(async () => {
-    setLoading(true)
-    setError('')
-    try {
-      setData(await apiRequest<DashboardResponse>('/api/oca/dashboard'))
-    } catch (caught) {
-      if (caught instanceof ApiError && caught.status === 401) clearSession()
-      setError(caught instanceof ApiError ? caught.message : '대시보드를 불러오지 못했습니다.')
-    } finally {
-      setLoading(false)
+  useEffect(() => {
+    const controller = new AbortController()
+    const requestId = ++requestIdRef.current
+    void apiRequest<DashboardResponse>('/api/oca/dashboard', { signal: controller.signal })
+      .then((response) => {
+        if (!controller.signal.aborted && requestId === requestIdRef.current) setData(response)
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted || requestId !== requestIdRef.current) return
+        setError(caught instanceof ApiError ? caught.message : '대시보드를 불러오지 못했습니다.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestId === requestIdRef.current) setLoading(false)
+      })
+    return () => {
+      controller.abort()
+      requestIdRef.current += 1
     }
-  }, [clearSession])
-
-  useEffect(() => { void loadDashboard() }, [loadDashboard])
+  }, [retryKey])
 
   if (loading) return <PageLoader label="대시보드를 불러오는 중입니다." />
-  if (error) return <ErrorState message={error} onRetry={() => void loadDashboard()} />
+  if (error) return <ErrorState message={error} onRetry={() => { setLoading(true); setError(''); setRetryKey((value) => value + 1) }} />
   if (!data) return null
 
   const maxStage = Math.max(1, ...data.by_stage.map((item) => item.count))
@@ -87,7 +96,7 @@ export function DashboardPage() {
         {data.recent_tickets.length === 0 ? <EmptyState message="최근 등록된 문의가 없습니다." /> : (
           <div className="table-wrap">
             <table><thead><tr><th>문의 번호</th><th>제목</th><th>상태</th><th>긴급도</th><th>담당자</th><th>등록일</th></tr></thead>
-              <tbody>{data.recent_tickets.map((ticket) => <tr key={ticket.id}><td className="reference">{ticket.reference || `#${ticket.id}`}</td><td className="title-cell">{ticket.title}</td><td><span className="status-badge">{ticket.status?.name ?? '미지정'}</span></td><td><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span></td><td>{ticket.assignee?.name ?? '미배정'}</td><td>{formatDate(ticket.created_at)}</td></tr>)}</tbody>
+              <tbody>{data.recent_tickets.map((ticket) => <tr className="clickable-row" key={ticket.id} tabIndex={0} onClick={() => navigate(`/tickets/${ticket.id}`)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') navigate(`/tickets/${ticket.id}`) }}><td className="reference">{ticket.reference || `#${ticket.id}`}</td><td className="title-cell"><Link to={`/tickets/${ticket.id}`} onClick={(event) => event.stopPropagation()}>{ticket.title}</Link></td><td><span className="status-badge">{ticket.status?.name ?? '미지정'}</span></td><td><span className={`priority-badge priority-badge--${ticket.priority_code}`}>{ticket.priority}</span></td><td>{ticket.assignee?.name ?? '미배정'}</td><td>{formatDate(ticket.created_at)}</td></tr>)}</tbody>
             </table>
           </div>
         )}

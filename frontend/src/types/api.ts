@@ -36,6 +36,36 @@ export interface Ticket {
   updated_at: string | null
 }
 
+export interface TicketCreateResponse {
+  success: boolean
+  message: string
+  ticket_id: number
+  auto_assigned: boolean
+  assignee: Relation | null
+}
+
+export interface TicketDetailResponse {
+  success: boolean
+  ticket: Ticket
+}
+
+export interface TicketCategory {
+  id: number
+  name: string
+  complete_name: string
+  sequence: number
+  active: boolean
+  parent: Relation | null
+  show_in_portal: boolean
+  default_assignee: Relation | null
+}
+
+export interface TicketCategoryListResponse {
+  success: boolean
+  count: number
+  categories: TicketCategory[]
+}
+
 export interface TicketListResponse {
   success: boolean
   count: number
