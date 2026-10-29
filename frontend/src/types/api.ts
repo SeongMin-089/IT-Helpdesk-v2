@@ -49,6 +49,16 @@ export interface TicketDetailResponse {
   ticket: Ticket
 }
 
+export interface TicketUpdateResponse extends TicketDetailResponse {
+  message: string
+}
+
+export interface AssigneeListResponse {
+  success: boolean
+  count: number
+  assignees: Relation[]
+}
+
 export interface TicketCategory {
   id: number
   name: string
