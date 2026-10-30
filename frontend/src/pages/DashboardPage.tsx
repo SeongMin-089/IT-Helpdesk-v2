@@ -8,10 +8,10 @@ import { formatDate, stageLabel } from '../services/format'
 import type { DashboardResponse } from '../types/api'
 
 const summaryCards = [
-  { key: 'total', label: '전체 문의', helper: '활성 문의 전체', icon: TicketCheck },
-  { key: 'open', label: '진행 중 문의', helper: '종료 전 문의', icon: CircleDot },
-  { key: 'closed', label: '종료 문의', helper: '처리가 완료된 문의', icon: CircleCheckBig },
-  { key: 'unassigned', label: '미배정 문의', helper: '담당자 확인 필요', icon: Inbox },
+  { key: 'total', label: '전체 문의', helper: '활성 문의 전체', icon: TicketCheck, to: '/tickets' },
+  { key: 'open', label: '진행 중 문의', helper: '종료 전 문의', icon: CircleDot, to: '/tickets?closed=false' },
+  { key: 'closed', label: '종료 문의', helper: '처리가 완료된 문의', icon: CircleCheckBig, to: '/tickets?closed=true' },
+  { key: 'unassigned', label: '미배정 문의', helper: '담당자 확인 필요', icon: Inbox, to: '/tickets?closed=false&unassigned=true' },
 ] as const
 
 export function DashboardPage() {
@@ -57,11 +57,11 @@ export function DashboardPage() {
       </header>
 
       <section className={`summary-grid${user?.role === 'agent' ? ' summary-grid--agent' : ''}`} aria-label="문의 요약">
-        {summaryCards.map(({ key, label, helper, icon: Icon }) => (
-          <article className="summary-card" key={key}>
+        {summaryCards.map(({ key, label, helper, icon: Icon, to }) => (
+          <Link className="summary-card summary-card--link" to={to} key={key}>
             <span className={`summary-card__icon summary-card__icon--${key}`}><Icon size={21} /></span>
             <div><span>{label}</span><strong>{data.summary[key].toLocaleString()}</strong><small>{helper}</small></div>
-          </article>
+          </Link>
         ))}
         {user?.role === 'agent' && data.summary.assigned_to_me !== undefined && (
           <Link className="summary-card summary-card--link" to="/assigned">

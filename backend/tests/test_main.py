@@ -1,6 +1,8 @@
+import asyncio
 import base64
 import copy
 import sys
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -1002,6 +1004,59 @@ class AuthApiTests(unittest.TestCase):
         self.assertNotIn("/api/tickets/{ticket_id}", paths)
         self.assertIn("/", paths)
         self.assertEqual(legacy.root()["status"], "running")
+
+
+class AuthConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        auth._VERIFICATION_TASKS.clear()
+
+    async def asyncTearDown(self):
+        pending = list(auth._VERIFICATION_TASKS.values())
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        auth._VERIFICATION_TASKS.clear()
+
+    async def test_concurrent_requests_share_one_in_flight_session_verification(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def verify(session_id):
+            nonlocal calls
+            self.assertEqual(session_id, AuthApiTests.SESSION_ID)
+            with calls_lock:
+                calls += 1
+            started.set()
+            release.wait(timeout=2)
+            return copy.deepcopy(TEST_AGENT)
+
+        with patch.object(auth, "get_verified_user", side_effect=verify):
+            requests = [
+                asyncio.create_task(
+                    auth.get_verified_user_for_request(AuthApiTests.SESSION_ID)
+                )
+                for _ in range(6)
+            ]
+            await asyncio.sleep(0.05)
+            self.assertTrue(started.is_set())
+            release.set()
+            users = await asyncio.gather(*requests)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual([user["id"] for user in users], [TEST_AGENT["id"]] * 6)
+
+    async def test_completed_verification_is_not_cached(self):
+        with patch.object(
+            auth,
+            "get_verified_user",
+            return_value=copy.deepcopy(TEST_AGENT),
+        ) as verify:
+            await auth.get_verified_user_for_request(AuthApiTests.SESSION_ID)
+            await asyncio.sleep(0)
+            await auth.get_verified_user_for_request(AuthApiTests.SESSION_ID)
+
+        self.assertEqual(verify.call_count, 2)
 
 
 class OcaTicketApiTests(unittest.TestCase):
@@ -2852,6 +2907,42 @@ class OdooJson2Tests(unittest.TestCase):
         with patch.object(odoo.requests, "post", return_value=response):
             with self.assertRaises(HTTPException) as caught:
                 odoo.get_session_info("A" * 84)
+
+        self.assertEqual(caught.exception.status_code, 401)
+
+    def test_transient_session_info_error_is_not_reported_as_authentication_failure(self):
+        transient_error = Mock()
+        transient_error.raise_for_status.return_value = None
+        transient_error.json.return_value = {
+            "error": {"data": {"name": "builtins.TimeoutError"}}
+        }
+        healthy_response = Mock()
+        healthy_response.raise_for_status.return_value = None
+        healthy_response.json.return_value = {"result": {"uid": 7}}
+
+        with patch.object(
+            odoo.requests,
+            "post",
+            side_effect=[transient_error, healthy_response],
+        ):
+            with self.assertRaises(HTTPException) as caught:
+                odoo.get_session_info("A" * 84)
+            recovered = odoo.get_session_info("A" * 84)
+
+        self.assertEqual(caught.exception.status_code, 502)
+        self.assertEqual(caught.exception.detail, "Odoo session request failed")
+        self.assertEqual(recovered["uid"], 7)
+
+    def test_login_jsonrpc_error_remains_authentication_failure(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "error": {"data": {"name": "builtins.ValueError"}}
+        }
+
+        with patch.object(odoo.requests, "post", return_value=response):
+            with self.assertRaises(HTTPException) as caught:
+                odoo.authenticate_session("employee", "wrong-password")
 
         self.assertEqual(caught.exception.status_code, 401)
 

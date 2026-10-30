@@ -88,7 +88,6 @@ def get_session_info(session_id):
         "/web/session/get_session_info",
         {},
         session_id=session_id,
-        authentication=True,
     )
     if not isinstance(result, dict) or not result.get("uid"):
         raise HTTPException(status_code=401, detail="Odoo session expired")
@@ -114,7 +113,6 @@ def destroy_session(session_id):
         "/web/session/destroy",
         {},
         session_id=session_id,
-        authentication=True,
         allow_missing_result=True,
     )
 

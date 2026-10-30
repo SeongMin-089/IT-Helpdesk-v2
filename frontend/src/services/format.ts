@@ -62,7 +62,7 @@ export function roleLabel(role: 'employee' | 'agent') {
 
 const stageLabels: Record<string, string> = {
   new: '접수',
-  assigned: '배정',
+  assigned: '담당자 확인',
   'in progress': '처리 중',
   resolved: '해결',
   done: '종료',

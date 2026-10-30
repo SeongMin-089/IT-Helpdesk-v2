@@ -1,3 +1,4 @@
+import asyncio
 import re
 from contextvars import ContextVar
 
@@ -22,6 +23,7 @@ GROUPS = {
     "helpdesk_manager": "helpdesk_mgmt.group_helpdesk_manager",
 }
 CURRENT_USER = ContextVar("it_helpdesk_current_user", default=None)
+_VERIFICATION_TASKS = {}
 
 
 def require_trusted_origin(request):
@@ -115,9 +117,27 @@ def get_verified_user(session_id):
     }
 
 
+async def get_verified_user_for_request(session_id):
+    # Share only an in-flight verification; completed results must not cache
+    # session validity or group membership across later requests.
+    task = _VERIFICATION_TASKS.get(session_id)
+    if task is None:
+        task = asyncio.create_task(run_in_threadpool(get_verified_user, session_id))
+        _VERIFICATION_TASKS[session_id] = task
+
+        def clear_completed(completed):
+            if _VERIFICATION_TASKS.get(session_id) is completed:
+                _VERIFICATION_TASKS.pop(session_id, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(clear_completed)
+    return await asyncio.shield(task)
+
+
 async def require_authenticated_user(request: Request):
     session_id = get_cookie_session(request)
-    user = await run_in_threadpool(get_verified_user, session_id)
+    user = await get_verified_user_for_request(session_id)
     request.state.auth_user = user
     token = CURRENT_USER.set(user)
     try:

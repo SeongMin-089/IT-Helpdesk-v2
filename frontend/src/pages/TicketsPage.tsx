@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUpDown, ChevronLeft, ChevronRight, Filter, RotateCcw, Search, SlidersHorizontal } from 'lucide-react'
-import { Link, useNavigate } from 'react-router'
+import { Link, useNavigate, useSearchParams } from 'react-router'
 import { EmptyState, ErrorState, PageLoader } from '../components/common/PageState'
 import { useAuth } from '../contexts/AuthContext'
 import { ApiError, apiRequest, toQuery } from '../services/api'
@@ -25,6 +25,10 @@ const sortOptions = [
 export function TicketsPage({ assignedOnly = false, archivedOnly = false }: { assignedOnly?: boolean; archivedOnly?: boolean }) {
   const { user } = useAuth()
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedClosed = searchParams.get('closed')
+  const closed = requestedClosed === 'true' || requestedClosed === 'false' ? requestedClosed : ''
+  const unassigned = !assignedOnly && searchParams.get('unassigned') === 'true'
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [stageId, setStageId] = useState('')
@@ -35,9 +39,7 @@ export function TicketsPage({ assignedOnly = false, archivedOnly = false }: { as
   const [requesterId, setRequesterId] = useState('')
   const [teamId, setTeamId] = useState('')
   const [tagId, setTagId] = useState('')
-  const [unassigned, setUnassigned] = useState(false)
-  const [closed, setClosed] = useState('')
-  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(Boolean(closed || unassigned))
   const [page, setPage] = useState(1)
   const [stages, setStages] = useState<Stage[]>([])
   const [stagesLoading, setStagesLoading] = useState(true)
@@ -117,7 +119,7 @@ export function TicketsPage({ assignedOnly = false, archivedOnly = false }: { as
       partner_id: user?.role === 'agent' ? requesterId : undefined,
       team_id: user?.role === 'agent' ? teamId : undefined,
       tag_id: user?.role === 'agent' ? tagId : undefined,
-      unassigned: user?.role === 'agent' && !assignedOnly && unassigned ? 'true' : undefined,
+      unassigned: !assignedOnly && unassigned ? 'true' : undefined,
       closed,
       page,
       page_size: 20,
@@ -159,6 +161,21 @@ export function TicketsPage({ assignedOnly = false, archivedOnly = false }: { as
     setPage(1)
   }
 
+  const updateUrlFilters = (updates: { closed?: string; unassigned?: boolean }) => {
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current)
+      if (updates.closed !== undefined) {
+        if (updates.closed) next.set('closed', updates.closed)
+        else next.delete('closed')
+      }
+      if (updates.unassigned !== undefined) {
+        if (updates.unassigned) next.set('unassigned', 'true')
+        else next.delete('unassigned')
+      }
+      return next
+    }, { replace: true })
+  }
+
   const resetFilters = () => {
     startFilterChange()
     setSearch('')
@@ -171,8 +188,7 @@ export function TicketsPage({ assignedOnly = false, archivedOnly = false }: { as
     setRequesterId('')
     setTeamId('')
     setTagId('')
-    setUnassigned(false)
-    setClosed('')
+    setSearchParams({}, { replace: true })
   }
 
   return (
@@ -193,9 +209,9 @@ export function TicketsPage({ assignedOnly = false, archivedOnly = false }: { as
         <div className="advanced-filter-card__heading"><div><SlidersHorizontal size={17} /><span>상세 필터</span></div><div><button className="button button--secondary" type="button" onClick={resetFilters}><RotateCcw size={15} />초기화</button><button className="button button--secondary" type="button" onClick={() => setAdvancedOpen((value) => !value)}>{advancedOpen ? '접기' : '펼치기'}</button></div></div>
         {advancedOpen && <div className="advanced-filter-grid">
           <label className="form-field"><span>문의 유형</span><select value={categoryId} onChange={(event) => { startFilterChange(); setCategoryId(event.target.value) }} disabled={filterOptionsLoading}><option value="">전체 유형</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.complete_name || category.name}</option>)}</select></label>
-          <label className="form-field"><span>종료 여부</span><select value={closed} onChange={(event) => { startFilterChange(); setClosed(event.target.value) }}><option value="">전체</option><option value="false">종료 전</option><option value="true">종료</option></select></label>
-          {user?.role === 'agent' && !assignedOnly && <label className="form-field"><span>담당자</span><select value={assigneeId} onChange={(event) => { startFilterChange(); setAssigneeId(event.target.value); if (event.target.value) setUnassigned(false) }} disabled={filterOptionsLoading}><option value="">전체 담당자</option>{assignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label>}
-          {user?.role === 'agent' && !assignedOnly && <label className="form-field"><span>배정 여부</span><select value={unassigned ? 'true' : ''} onChange={(event) => { startFilterChange(); const nextUnassigned = event.target.value === 'true'; setUnassigned(nextUnassigned); if (nextUnassigned) setAssigneeId('') }}><option value="">전체</option><option value="true">미배정만</option></select></label>}
+          <label className="form-field"><span>종료 여부</span><select value={closed} onChange={(event) => { startFilterChange(); updateUrlFilters({ closed: event.target.value }) }}><option value="">전체</option><option value="false">종료 전</option><option value="true">종료</option></select></label>
+          {user?.role === 'agent' && !assignedOnly && <label className="form-field"><span>담당자</span><select value={assigneeId} onChange={(event) => { startFilterChange(); setAssigneeId(event.target.value); if (event.target.value) updateUrlFilters({ unassigned: false }) }} disabled={filterOptionsLoading}><option value="">전체 담당자</option>{assignees.map((assignee) => <option key={assignee.id} value={assignee.id}>{assignee.name}</option>)}</select></label>}
+          {!assignedOnly && <label className="form-field"><span>배정 여부</span><select value={unassigned ? 'true' : ''} onChange={(event) => { startFilterChange(); const nextUnassigned = event.target.value === 'true'; updateUrlFilters({ unassigned: nextUnassigned }); if (nextUnassigned) setAssigneeId('') }}><option value="">전체</option><option value="true">미배정만</option></select></label>}
           {user?.role === 'agent' && <label className="form-field"><span>요청자</span><select value={requesterId} onChange={(event) => { startFilterChange(); setRequesterId(event.target.value) }} disabled={filterOptionsLoading}><option value="">전체 요청자</option>{filterOptions?.requesters.map((requester) => <option key={requester.id} value={requester.id}>{requester.name}</option>)}</select></label>}
           {user?.role === 'agent' && <label className="form-field"><span>팀</span><select value={teamId} onChange={(event) => { startFilterChange(); setTeamId(event.target.value) }} disabled={filterOptionsLoading}><option value="">전체 팀</option>{filterOptions?.teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></label>}
           {user?.role === 'agent' && <label className="form-field"><span>티켓 태그</span><select value={tagId} onChange={(event) => { startFilterChange(); setTagId(event.target.value) }} disabled={filterOptionsLoading}><option value="">전체 태그</option>{filterOptions?.tags.map((tag) => <option key={tag.id} value={tag.id}>{tag.name}</option>)}</select></label>}
